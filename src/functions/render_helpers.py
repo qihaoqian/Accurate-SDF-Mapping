@@ -88,15 +88,15 @@ def extra_interp(sampled_xyz, point_xyz, point_feats, point_vector_features, vox
     perform cubic linear interpolation to obtain the feature of each point.
     
     Args:
-        p: 归一化的采样点位置 (N_points, 1, 3)
-        q: 体素8个顶点的偏移坐标 (1, 8, 3) 
-        point_feats: 8个顶点的特征 (N_points, 8*embed_dim)
-        point_vector_features: 8个顶点的方向特征 (N_points, 8, 3)
+        p: normalized sampling point position (N_points, 1, 3)
+        q: offset coordinates of 8 vertices of voxel (1, 8, 3) 
+        point_feats: features of 8 vertices (N_points, 8*embed_dim)
+        point_vector_features: direction features of 8 vertices (N_points, 8, 3)
     
     Returns:
-        interpolated_feats: 插值后的特征 (N_points, embed_dim)
+        interpolated_feats: interpolated features (N_points, embed_dim)
     """
-    # === 1) 计算所有 (N*8) 顶点世界坐标 ===
+    # === 1) Calculate all (N*8) vertex world coordinates ===
     cut = torch.linspace(-1, 1, 2, device=sampled_xyz.device)
     xx, yy, zz = torch.meshgrid(cut, cut, cut, indexing='ij')
     offsets = torch.stack([xx, yy, zz], dim=-1).reshape(1, 8, 3)  # (1,8,3)
@@ -106,11 +106,11 @@ def extra_interp(sampled_xyz, point_xyz, point_feats, point_vector_features, vox
     verts = point_xyz.unsqueeze(1) + offsets * scale                # (N,8,3)
     verts = verts.reshape(-1, 3).contiguous()
     
-    # 计算每个采样点与每个顶点的偏移向量
-    # 使用广播：(N_points, 1, 3) - (1, 8, 3) = (N_points, 8, 3)
+    # Calculate offset vector between each sampling point and each vertex
+    # Use broadcasting: (N_points, 1, 3) - (1, 8, 3) = (N_points, 8, 3)
     verts = verts.reshape(-1, 8, 3)
     point_vector_features = point_vector_features.reshape(-1, 8, 3)
-    # 在最后一个维度上normalize
+    # Normalize in the last dimension
     # point_vector_features = torch.nn.functional.normalize(point_vector_features, dim=-1)
     
     point_feats = point_feats.reshape(-1, 8)
@@ -124,18 +124,18 @@ def extra_interp(sampled_xyz, point_xyz, point_feats, point_vector_features, vox
 @torch.enable_grad()  
 def combined_interpolation(sampled_xyz, point_xyz, point_feats, point_vector_features, voxel_size, point_voxel_size):
     """
-    结合extra_interp和linear_interp_3d的综合插值方法
+    Combined interpolation method that integrates extra_interp and linear_interp_3d
     
     Args:
-        p: 归一化的采样点位置 (N_points, 1, 3)
-        q: 体素8个顶点的偏移坐标 (1, 8, 3)
-        point_feats: 8个顶点的特征 (N_points, 8*embed_dim)
-        point_vector_features: 8个顶点的方向特征 (N_points, 8, 3)
+        p: normalized sampling point position (N_points, 1, 3)
+        q: offset coordinates of 8 vertices of voxel (1, 8, 3)
+        point_feats: features of 8 vertices (N_points, 8*embed_dim)
+        point_vector_features: direction features of 8 vertices (N_points, 8, 3)
     
     Returns:
-        final_result: 最终插值结果 (N_points, embed_dim)
+        final_result: final interpolation result (N_points, embed_dim)
     """
-    # 方法1：使用额外插值（类似于test_interpolation.py中的extra_interpolation方法）
+    # Method 1: Use extra interpolation (similar to extra_interpolation method in test_interpolation.py)
     extra_interpolated_features = extra_interp(sampled_xyz, point_xyz, point_feats, point_vector_features, voxel_size, point_voxel_size)
     
     # tri-linear interpolation
@@ -451,76 +451,77 @@ def render_rays(
 
 def finite_diff_grad_combined_safe(chunk_samples, map_states, voxel_size, sdf_network, h1=1e-4):
     """
-    安全的有限差分梯度计算，确保xyz三个方向的扰动都不越界才计算梯度
+    Safe finite difference gradient computation, ensuring gradients are computed only when perturbations 
+    in all xyz directions do not go out of bounds
     
     Args:
-        chunk_samples (dict): 包含采样点信息的字典
-        map_states (dict): 体素地图状态信息
-        voxel_size (int): 体素大小
-        sdf_network: SDF神经网络
-        h1 (float): 有限差分步长
+        chunk_samples (dict): dictionary containing sampling point information
+        map_states (dict): voxel map state information
+        voxel_size (int): voxel size
+        sdf_network: SDF neural network
+        h1 (float): finite difference step size
     
     Returns:
-        grad (tensor): 梯度张量 [N_points, 3]
-        grad_magnitude (tensor): 梯度大小 [N_points, 1]
-        valid_mask (tensor): 有效梯度的掩码 [N_points]
+        grad (tensor): gradient tensor [N_points, 3]
+        grad_magnitude (tensor): gradient magnitude [N_points, 1]
+        valid_mask (tensor): valid gradient mask [N_points]
     """
     X = chunk_samples['sampled_point_xyz']  # [N_points, 3]
     
     def safe_combined_forward_subset(xyz_points, voxel_idx_subset):
-        """只对有效点子集进行前向传播"""
+        """Forward propagation only for valid point subset"""
         if xyz_points.shape[0] == 0:
             return torch.zeros(0, 1, device=xyz_points.device)
         
 
         chunk_inputs = get_features(xyz_points, voxel_idx_subset, map_states, voxel_size)
         
-        # 通过SDF网络
+        # Through SDF network
         chunk_outputs = sdf_network(xyz_points)
         
-        # 组合最终的SDF值
+        # Combine final SDF values
         final_sdf = chunk_outputs['sdf'] + chunk_inputs['sdf_priors'][:, -1]
             
         return final_sdf
             
-    # 自适应步长：确保偏移后的点仍在体素内
-    adaptive_h1 = min(h1, voxel_size * 0.1)  # 限制步长不超过体素大小的10%
+    # Adaptive step size: ensure perturbed points remain within voxels
+    adaptive_h1 = min(h1, voxel_size * 0.1)  # Limit step size to not exceed 10% of voxel size
     
-    # 预先检查所有方向的扰动是否都在体素内
-    # 为xyz三个方向创建所有可能的扰动
+    # Pre-check if perturbations in all directions are within voxels
+    # Create all possible perturbations for xyz three directions
     all_offsets = []
-    for i in range(3):  # x, y, z三个维度
-        for direction in [1, -1]:  # 正向和负向
+    for i in range(3):  # x, y, z three dimensions
+        for direction in [1, -1]:  # positive and negative directions
             offset = torch.zeros_like(X)
             offset[:, i] = direction * adaptive_h1
             all_offsets.append(X + offset)
     
-    # 检查所有扰动是否都在体素内
+    # Check if all perturbations are within voxels
     voxel_idx_list = []
     for offset_points in all_offsets:
-        # 使用优化版本的体素索引查找
+        # Use optimized version of voxel index lookup
         voxel_idx = find_voxel_idx(offset_points, map_states)
         voxel_idx_list.append(voxel_idx)
     
-    # 只有当所有6个方向的扰动的voxel_idx都不为-1时，该点才能计算梯度
+    # Only when voxel_idx of perturbations in all 6 directions are not -1, can the point compute gradient
     voxel_idx_stack = torch.stack(voxel_idx_list, dim=0)  # [6, N_points]
     
     
-    # 初始化梯度张量
+    # Initialize gradient tensor
     grad = torch.zeros_like(X)
     
-    # 只对有效的点计算梯度
+    # Compute gradients only for valid points
         
-    for i in range(3):  # 对于x, y, z三个维度
-        # 创建偏移向量
+    for i in range(3):  # For x, y, z three dimensions
+        # Create offset vector
         offset = torch.zeros_like(X)
         offset[:, i] = adaptive_h1
         
-        # 计算正向和负向扰动的SDF值（只对有效点）
+        # Compute SDF values for positive and negative perturbations (only for valid points)
         sdf_plus = safe_combined_forward_subset(X + offset, voxel_idx_stack[2*i,:])
         sdf_minus = safe_combined_forward_subset(X - offset, voxel_idx_stack[2*i+1,:])
         
-        # 使用中心差分公式计算梯度
+        # Use central difference formula to compute gradient
         grad_i = (sdf_plus - sdf_minus) / (2 * adaptive_h1)
         
         grad[:, i] = grad_i.squeeze(-1)
@@ -594,31 +595,31 @@ def bundle_adjust_frames(
     perturbation_xyz = sampled_xyz[perturbation_mask.squeeze(-1)]
     
     with torch.no_grad():
-        batch_size = 10000  # 按显存情况调节
+        batch_size = 10000  # Adjust according to GPU memory
         nearest_distances_list = []
 
         for start in range(0, perturbation_xyz.shape[0], batch_size):
             end = start + batch_size
             perturb_batch = perturbation_xyz[start:end]  # (B, 3)
 
-            # 计算当前批次与所有 surface 点的距离
+            # Calculate distance between current batch and all surface points
             distances = torch.cdist(perturb_batch, surface_xyz)  # (B, M)
 
-            # 找每个点最近的 surface
+            # Find nearest surface for each point
             batch_min_dists, _ = torch.min(distances, dim=1)
 
             nearest_distances_list.append(batch_min_dists)
 
-        # 拼接回完整结果
+        # Concatenate back to complete result
         nearest_distances = torch.cat(nearest_distances_list, dim=0)
     
-    # 在positive_mask的地方乘以-1
+    # Multiply by -1 at positive_mask locations
     nearest_distances[gaussian_positive_mask.squeeze(-1)] *= -1
     
     gt_sdf = nearest_distances.reshape(-1, 1)
 
     point_voxel_idx = find_voxel_idx(sampled_xyz, map_states)
-    # 将sampled_xyz, sampled_depth, negative_sdf_mask, point_voxel_idx 打包成一个字典 samples_valid
+    # Package sampled_xyz, sampled_depth, negative_sdf_mask, point_voxel_idx into a dictionary samples_valid
     samples = {
         'sampled_point_xyz': sampled_xyz,
         'sampled_point_voxel_idx': point_voxel_idx,
@@ -698,8 +699,9 @@ def bundle_adjust_frames(
 
 def find_voxel_idx(points, map_states):
     """
-    points: [N, 3] 世界坐标
-    返回:  [N] 每个点对应的全局体素索引，-1 表示不在树覆盖范围内 / 未命中叶子
+    Find voxel indices for given points
+    points: [N, 3] world coordinates
+    returns: [N] global voxel index for each point, -1 indicates not in tree coverage / missed leaf
     """
     device = points.device
     tree   = map_states["voxel_structure"].to(device)      # [M, 9]
@@ -711,28 +713,28 @@ def find_voxel_idx(points, map_states):
     max_steps = 9
     root_idx = 0
 
-    # 结果初始化为 -1
+    # Initialize result to -1
     voxel_idx = torch.full((N,), -1, dtype=torch.long, device=device)
 
-    # 当前仍在遍历的点索引、它们所在节点行号
+    # Point indices still being traversed and their current node row numbers
     active_pts   = torch.arange(N, device=device)        # [A]
-    cur_nodes    = torch.full_like(active_pts, root_idx) # 初始都在根节点
+    cur_nodes    = torch.full_like(active_pts, root_idx) # Initially all at root node
 
     for _ in range(max_steps):
         if active_pts.numel() == 0:
             break
 
-        # 计算子编号
+        # Calculate child numbers
         c        = centers[cur_nodes]                # [A,3]
         ge_mask  = (points[active_pts] >= c).long()  # [A,3]
         child_id = ge_mask[:, 0] + (ge_mask[:, 1] << 1) + (ge_mask[:, 2] << 2)
         child_idx = tree[cur_nodes, child_id].long() # [A]
 
-        # 命中条件：size==1 就直接确定
+        # Hit condition: directly determine when size==1
         hit_mask = (child_idx == -1)
         if hit_mask.any():
             voxel_idx[active_pts[hit_mask]] = cur_nodes[hit_mask]
-        # 仅继续没命中的
+        # Continue only with those that didn't hit
         keep_mask = ~hit_mask
         if not keep_mask.any():
             break
