@@ -499,7 +499,7 @@ def finite_diff_grad_combined_safe(chunk_samples, map_states, voxel_size, sdf_ne
     voxel_idx_list = []
     for offset_points in all_offsets:
         # 使用优化版本的体素索引查找
-        voxel_idx, _ = find_voxel_idx(offset_points, map_states)
+        voxel_idx = find_voxel_idx(offset_points, map_states)
         voxel_idx_list.append(voxel_idx)
     
     # 只有当所有6个方向的扰动的voxel_idx都不为-1时，该点才能计算梯度
