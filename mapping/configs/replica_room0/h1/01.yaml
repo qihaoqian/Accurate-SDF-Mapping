@@ -1,0 +1,72 @@
+log_dir: './logs'
+decoder: parallel_hash_net
+dataset: replica
+update_pose: False
+
+exp_name: h1/01
+
+criteria:
+  boundary_loss_weight: 1000
+  perturbation_loss_weight: 100
+  eikonal_surface_weight: 3
+  eikonal_space_weight: 10
+  heat_weight: 30
+  sign_weight_free: 0
+  sign_weight_occ: 0
+  projection_weight: 100
+  grad_dir_weight: 0
+  heat_lambda: 4
+  h1: 0.01
+
+decoder_specs:
+  voxel_size: 0.05 # same as mapper_specs
+  L: 4  # Number of levels
+  F_entry: 2  # Number of feature dimensions per entry
+  log2_T: 19  # each level's hashmap_size =  F_entry * (2**F_entry)
+  b: 2.0  # each level's resolution = N_min * (b**Level)
+  bound: [ [ 0,10 ],[ 0,6 ],[ 0,4 ] ]
+
+sample_specs:
+  N: 1
+  M: 2
+  d_min: 0.07
+  delta: 0.1
+  sigma_s: 0.05
+  max_depth: 10.0
+
+mapper_specs:
+  start_frame: 0
+  end_frame: -1
+  N_rays_each: 4096 # mapping's sampling ray
+  num_vertexes: 200000
+  inflate_margin_ratio: 0.1
+  voxel_size: 0.1
+  step_size: 0.1
+  num_iterations: 10
+  max_voxel_hit: 10
+  final_iter: 0
+  mesh_res: 256
+  overlap_th: 0.8
+  kf_window_size: 16
+  kf_selection_method: "multiple_max_set_coverage" # "random” or “multiple_max_set_coverage”
+  kf_selection_random_radio: 0.5   # random keyframe ratio
+  insert_method: "intersection" # "naive" or "intersection"
+  insert_ratio: 0.85
+  offset: 2 # used to make make the coordinate of each point positive
+  use_adaptive_ending: True # adaptive iteration
+
+debug_args:
+  verbose: false
+  mesh_freq: -1
+  render_freq: -1
+  save_ckpt_freq: -1
+  render_res: [ 320, 240 ]
+
+data_specs:
+  data_path: '../Datasets/Replica/room0'
+  max_depth: 10
+  use_gt: True
+
+
+
+
