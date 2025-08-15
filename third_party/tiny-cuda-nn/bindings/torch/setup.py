@@ -26,8 +26,10 @@ def max_supported_compute_capability(cuda_version):
 		return 80
 	elif cuda_version < parse_version("11.8"):
 		return 86
-	else:
+	elif cuda_version < parse_version("12.8"):
 		return 90
+	else:
+		return 120
 
 # Find version of tinycudann by scraping CMakeLists.txt
 with open(os.path.join(ROOT_DIR, "CMakeLists.txt"), "r") as cmakelists:
@@ -108,6 +110,7 @@ print(f"Targeting C++ standard {cpp_standard}")
 base_nvcc_flags = [
 	f"-std=c++{cpp_standard}",
 	"--extended-lambda",
+	"--use_fast_math",
 	"--expt-relaxed-constexpr",
 	# The following definitions must be undefined
 	# since TCNN requires half-precision operation.
@@ -137,6 +140,8 @@ base_definitions = [
 	# PyTorch-supplied parameters may be unaligned. TCNN must be made aware of this such that
 	# it does not optimize for aligned memory accesses.
 	"-DTCNN_PARAMS_UNALIGNED",
+	"-DTCNN_RTC",
+	"-DTCNN_RTC_USE_FAST_MATH",
 ]
 
 base_source_files = [
@@ -147,6 +152,7 @@ base_source_files = [
 	"../../src/common_host.cu",
 	"../../src/encoding.cu",
 	"../../src/object.cu",
+	"../../src/rtc_kernel.cu",
 ]
 
 if include_networks:
@@ -156,6 +162,36 @@ if include_networks:
 	]
 else:
 	base_definitions.append("-DTCNN_NO_NETWORKS")
+
+# Copy headers required by RTC at runtime
+rtc_dir = os.path.join(bindings_dir, "tinycudann", "rtc")
+rtc_include_dir = os.path.join(rtc_dir, "include")
+rtc_cache_dir = os.path.join(rtc_dir, "cache")
+shutil.rmtree(rtc_dir, ignore_errors=True)
+os.makedirs(rtc_include_dir, exist_ok=True)
+os.makedirs(rtc_cache_dir, exist_ok=True)
+
+nvcc_path = shutil.which("nvcc")
+if nvcc_path is None:
+	print(f"WARNING: could not find CUDA include directory. JIT compilation will not be supported.")
+else:
+	cuda_include_dir = os.path.join(os.path.dirname(os.path.dirname(nvcc_path)), "include")
+
+	cuda_headers = glob(f"{cuda_include_dir}/cuda_fp16*") + glob(f"{cuda_include_dir}/vector*")
+	tcnn_headers = glob(f"{root_dir}/include/tiny-cuda-nn/*", recursive=True)
+	pcg32_headers = glob(f"{root_dir}/dependencies/pcg32/*")
+
+	def copy_files(whence, files):
+		for h in files:
+			if not os.path.isfile(h):
+				continue
+			tgt = os.path.join(rtc_include_dir, os.path.relpath(h, whence))
+			os.makedirs(os.path.dirname(tgt), exist_ok=True)
+			shutil.copyfile(h, tgt)
+
+	copy_files(cuda_include_dir, cuda_headers)
+	copy_files(f"{root_dir}/include", tcnn_headers)
+	copy_files(f"{root_dir}/dependencies", pcg32_headers)
 
 def make_extension(compute_capability):
 	nvcc_flags = base_nvcc_flags + [f"-gencode=arch=compute_{compute_capability},code={code}_{compute_capability}" for code in ["compute", "sm"]]
@@ -180,11 +216,18 @@ def make_extension(compute_capability):
 			f"{root_dir}/dependencies/fmt/include",
 		],
 		extra_compile_args={"cxx": cflags, "nvcc": nvcc_flags},
-		libraries=["cuda"],
+		libraries=["cuda", "nvrtc"],
 	)
 	return ext
 
 ext_modules = [make_extension(comp) for comp in compute_capabilities]
+
+def package_files(directory):
+	paths = []
+	for (path, _, filenames) in os.walk(directory):
+		for filename in filenames:
+			paths.append(os.path.join('..', path, filename))
+	return paths
 
 setup(
 	name="tinycudann",
@@ -211,6 +254,7 @@ setup(
 	download_url=f"https://github.com/nvlabs/tiny-cuda-nn",
 	license="BSD 3-Clause \"New\" or \"Revised\" License",
 	packages=["tinycudann"],
+	package_data={"": package_files(rtc_dir)},
 	install_requires=[],
 	include_package_data=True,
 	zip_safe=False,

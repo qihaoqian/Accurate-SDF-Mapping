@@ -105,7 +105,7 @@ class Mapping:
 
         self.svo = torch.classes.svo.Octree()
         self.svo.init(256, int(self.num_vertexes), self.voxel_size, 5)  # Must be a multiple of 2
-        self.optimize_params = [{'params': self.decoder.parameters(), 'lr': 2e-3},
+        self.optimize_params = [{'params': self.decoder.parameters(), 'lr': 1e-2},
                                 {'params': self.sdf_priors, 'lr': 1e-2},
                                 {'params': self.vector_features, 'lr': 1e-2}]
 
@@ -141,9 +141,7 @@ class Mapping:
     def mapping_step(self, frame_id, tracked_frame, update_pose, epoch):
         ######################
         self.idx = tracked_frame.stamp
-        points = self.create_voxels(tracked_frame)
-        downsampled_points = points[::80]
-        # init_sdf_with_nearest_surface(tracked_frame, downsampled_points, self.map_states, self.voxel_size)
+        self.create_voxels(tracked_frame)
 
         self.sdf_priors = self.map_states["sdf_priors"]
         self.vector_features = self.map_states["vector_features"]
@@ -172,9 +170,6 @@ class Mapping:
 
         if self.save_data_freq > 0 and (tracked_frame.stamp + 1) % self.save_data_freq == 0:
             self.save_debug_data(tracked_frame)
-
-        # if self.render_freq > 0 and (frame_id + 1) % self.render_freq == 0:
-        #     self.render_debug_images(tracked_frame)
 
         if self.save_ckpt_freq > 0 and (tracked_frame.stamp + 1) % self.save_ckpt_freq == 0:
             self.logger.log_ckpt(self, name=f"{tracked_frame.stamp:06d}.pth")

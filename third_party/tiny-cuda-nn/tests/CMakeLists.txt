@@ -1,6 +1,4 @@
-#!/usr/bin/env python3
-
-# Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2020-2025, NVIDIA CORPORATION.  All rights reserved.
 # 
 # Redistribution and use in source and binary forms, with or without modification, are permitted
 # provided that the following conditions are met:
@@ -22,29 +20,13 @@
 # STRICT LIABILITY, OR TOR (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import torch
-import tinycudann as tcnn
+function (create_test TEST_NAME)
+	add_executable(${TEST_NAME} ${TEST_NAME}.cu)
+	target_link_libraries(${TEST_NAME} tiny-cuda-nn)
+	add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+endfunction()
 
-net = tcnn.Network(
-	n_input_dims=3,
-	n_output_dims=3,
-	network_config={
-		"otype": "FullyFusedMLP",
-		"activation": "ReLU",
-		"output_activation": "None",
-		"n_neurons": 16,
-		"n_hidden_layers": 2,
-	},
-).cuda()
-
-x = torch.rand(256, 3, device='cuda')
-y = net(x)
-y.sum().backward() # OK
-
-
-x2 = torch.rand(256, 3, device='cuda')
-y = net(x)
-y2 = net(x2)
-(y + y2).sum().backward() # RuntimeError: Must call forward() before calling backward()
-
-print("success!")
+create_test(test_encodings)
+create_test(test_grid)
+create_test(test_jit_losses)
+create_test(test_networks)

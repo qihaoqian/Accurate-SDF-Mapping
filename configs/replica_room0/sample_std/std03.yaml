@@ -63,7 +63,7 @@ debug_args:
   render_res: [ 320, 240 ]
 
 data_specs:
-  data_path: '../Datasets/Replica/room0'
+  data_path: './Datasets/Replica/room0'
   max_depth: 10
   use_gt: True
 

@@ -1,9 +1,9 @@
 base_config: configs/replica/replica.yaml
 
-exp_name: replica/room0
+exp_name: replica/room0/
 
 data_specs:
-  data_path: '../Datasets/Replica/room0'
+  data_path: './Datasets/Replica/room0'
   max_depth: 10
   use_gt: True
 

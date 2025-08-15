@@ -3,7 +3,7 @@ base_config: configs/replica/replica.yaml
 exp_name: replica/office4
 
 data_specs:
-  data_path: '../Datasets/Replica/office4'
+  data_path: './Datasets/Replica/office4'
   max_depth: 10
   use_gt: True
 

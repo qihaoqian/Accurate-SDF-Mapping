@@ -18,7 +18,8 @@ Activation functions are specified by string, e.g. as follows:
 The following activation functions are supported:
 - `"None"` (identity)
 - `"ReLU"`
-- `"Leaky ReLU"` (defined as `max(0, x) + 0.01 * min(0, x)`)
+- `"LeakyReLU"` (defined as `max(0, x) + 0.01 * min(0, x)`)
+- `"SiLU"` (defined as `x * sigmoid(x)`, also known as Swish)
 - `"Exponential"`
 - `"Sine"`
 - `"Sigmoid"` (the logistic function)

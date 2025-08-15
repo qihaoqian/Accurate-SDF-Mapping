@@ -44,6 +44,7 @@ nlohmann::json config = {
 using namespace tcnn;
 
 auto model = create_from_config(n_input_dims, n_output_dims, config);
+model->set_jit_fusion(supports_jit_fusion()); // Optional: accelerate with JIT fusion
 
 // Train the model (batch_size must be a multiple of tcnn::BATCH_SIZE_GRANULARITY)
 GPUMatrix<float> training_batch_inputs(n_input_dims, batch_size);
@@ -64,6 +65,83 @@ generate_inputs(&inference_inputs); // <-- your code
 GPUMatrix<float> inference_outputs(n_output_dims, batch_size);
 model.network->inference(inference_inputs, inference_outputs);
 ```
+
+## JIT fusion
+
+JIT fusion is a new, optional feature with tiny-cuda-nn v2.0 and later.
+It is *almost always* recommended to enable [automatic JIT fusion](#automatic-jit-fusion) for a performance boost of 1.5x to 2.5x, depending on the model and GPU.
+Newer GPUs exhibit larger speedups.
+
+If your model has very large hash grids (~20 million+ parameters) or MLPs (layer sizes larger than 128 neurons), or when your GPU is an RTX 3000 series or earlier, JIT fusion *can* slow down training.
+Rarely inference, too.
+It this case, it is recommended to try enabling JIT fusion separately for training and inference to measure whether it is faster.
+
+Please [open an issue](https://github.com/NVlabs/tiny-cuda-nn/issues) if you encounter a slowdown in a different situation or other problems with JIT fusion enabled.
+
+### Automatic JIT fusion
+
+To enable JIT fusion, set the `jit_fusion` property of your model to `true`.
+All future uses of the model, whether inference or training, will then use JIT mode.
+Note that if there is an error during JIT compilation, a warning will be emitted and JIT compilation mode automatically turned off.
+Your code will still run using the tiny-cuda-nn 1.X code path.
+
+```cpp
+auto model = tcnn::create_from_config(...);
+model->set_jit_fusion(tcnn::supports_jit_fusion()); // Enable JIT if the system supports it
+```
+
+JIT fusion can also be enabled via the PyTorch bindings but the speed-up will be lower, particularly during training.
+This is because the JIT compiler does not have access to the whole compute graph and can therefore fuse and optimize less.
+
+```python
+import tinycudann as tcnn
+
+model = tcnn.NetworkWithInputEncoding(...) # Or any other tcnn model
+model.jit_fusion = tcnn.supports_jit_fusion() # Enable JIT if the system supports it
+```
+
+### Manual JIT fusion
+
+Even larger speed-ups are possible when applications integrate more tightly with JIT fusion.
+For example, [Instant NGP](https://github.com/nvlabs/instant-ngp) achieves a 5x speedup by fusing the entire NeRF ray marcher into a single kernel.
+
+JIT fusion works by converting a given tiny-cuda-nn model to a CUDA device function and then compiling it into a kernel using CUDA's runtime compilation (RTC) feature.
+
+To integrate a tiny-cuda-nn model with a larger kernel in your app, you need to
+1. turn your kernel into a string,
+2. prepend the tiny-cuda-nn model's device function,
+3. pass the result to tiny-cuda-nn's runtime compilation API.
+
+Here is an example that implements a minimal kernel using a tiny-cuda-nn model with 32 input dimensions and 16 output dimensions:
+```cpp
+#include <tiny-cuda-nn/rtc_kernel.h>
+
+auto model = tcnn::create_from_config(32 /* input dims */, 16 /* output dims */, ...);
+auto fused_kernel = tcnn::CudaRtcKernel(
+    "your_kernel",
+    fmt::format(R"
+        {MODEL_DEVICE_FUNCTION}
+        __global__ void your_kernel(...) {
+            // Get input to model from either registers or memory.
+            tcnn::hvec<32> input = ...;
+            // Call tiny-cuda-nn model. All 32 threads of the warp must be active here.
+            tcnn::hvec<16> output = model_fun(nerf_in, params); 
+            // Do something with the model output.
+        }",
+        fmt::arg("MODEL_DEVICE_FUNCTION", model->generate_device_function("model_fun")),
+    )
+);
+
+uint32_t blocks = 1;
+uint32_t threads = 128; // Must be multiple of 32 for neural networks to work.
+uint32_t shmem_size = 0; // Can be any size that your_kernel needs.
+cudaStream_t stream = nullptr; // Can be any stream.
+fused_kernel.launch(blocks, threads, shmem_size, stream, ... /* params of your_kernel */);
+```
+
+And here is Instant NGP's NeRF integration with the JIT compiler for reference:
+- [src/testbed_nerf.cu](https://github.com/NVlabs/instant-ngp/blob/d6bbefb0b68e6322711b518eac7f9ab4c1cc7b1e/src/testbed_nerf.cu#L1931)
+- [include/neural-graphics-primitives/fused_kernels/render_nerf.cuh](https://github.com/NVlabs/instant-ngp/blob/master/include/neural-graphics-primitives/fused_kernels/render_nerf.cuh)
 
 
 ## Example: learning a 2D image
@@ -98,10 +176,10 @@ sudo apt-get install build-essential git
 ```
 
 We also recommend installing [CUDA](https://developer.nvidia.com/cuda-toolkit) in `/usr/local/` and adding the CUDA installation to your PATH.
-For example, if you have CUDA 11.4, add the following to your `~/.bashrc`
+For example, if you have CUDA 12.6.3, add the following to your `~/.bashrc`
 ```sh
-export PATH="/usr/local/cuda-11.4/bin:$PATH"
-export LD_LIBRARY_PATH="/usr/local/cuda-11.4/lib64:$LD_LIBRARY_PATH"
+export PATH="/usr/local/cuda-12.6.3/bin:$PATH"
+export LD_LIBRARY_PATH="/usr/local/cuda-12.6.3/lib64:$LD_LIBRARY_PATH"
 ```
 
 
@@ -161,6 +239,8 @@ model = tcnn.NetworkWithInputEncoding(
 encoding = tcnn.Encoding(n_input_dims, config["encoding"])
 network = tcnn.Network(encoding.n_output_dims, n_output_dims, config["network"])
 model = torch.nn.Sequential(encoding, network)
+
+model.jit_fusion = tcnn.supports_jit_fusion() # Optional: accelerate with JIT fusion
 ```
 
 See `samples/mlp_learning_an_image_pytorch.py` for an example.
@@ -225,7 +305,7 @@ If you use it in your research, we would appreciate a citation via
 	month = {4},
 	title = {{tiny-cuda-nn}},
 	url = {https://github.com/NVlabs/tiny-cuda-nn},
-	version = {1.7},
+	version = {2.0},
 	year = {2021}
 }
 ```

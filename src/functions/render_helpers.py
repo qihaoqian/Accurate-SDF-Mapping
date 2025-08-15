@@ -676,7 +676,7 @@ def bundle_adjust_frames(
             )
             
         global_step = epoch * num_iterations + idx
-        print(f"global_step: {global_step}, loss_dict: {loss_dict}")
+        print(f"loss_dict: {loss_dict}")
         if writer is not None:
             writer.add_scalar('loss/total_loss', loss.item(), global_step)
             for key, value in loss_dict.items():

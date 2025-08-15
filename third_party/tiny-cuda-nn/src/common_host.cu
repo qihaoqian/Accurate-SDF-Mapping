@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2020-2025, NVIDIA CORPORATION.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification, are permitted
  * provided that the following conditions are met:
@@ -29,7 +29,6 @@
 
 #include <tiny-cuda-nn/common_device.h>
 #include <tiny-cuda-nn/common_host.h>
-
 #include <tiny-cuda-nn/gpu_memory.h>
 #include <tiny-cuda-nn/multi_stream.h>
 
@@ -78,6 +77,8 @@ Activation string_to_activation(const std::string& activation_name) {
 		return Activation::ReLU;
 	} else if (equals_case_insensitive(activation_name, "LeakyReLU")) {
 		return Activation::LeakyReLU;
+	} else if (equals_case_insensitive(activation_name, "SiLU")) {
+		return Activation::SiLU;
 	} else if (equals_case_insensitive(activation_name, "Exponential")) {
 		return Activation::Exponential;
 	} else if (equals_case_insensitive(activation_name, "Sigmoid")) {
@@ -100,6 +101,7 @@ std::string to_string(Activation activation) {
 		case Activation::None: return "None";
 		case Activation::ReLU: return "ReLU";
 		case Activation::LeakyReLU: return "LeakyReLU";
+		case Activation::SiLU: return "SiLU";
 		case Activation::Exponential: return "Exponential";
 		case Activation::Sigmoid: return "Sigmoid";
 		case Activation::Sine: return "Sine";
@@ -140,6 +142,8 @@ HashType string_to_hash_type(const std::string& hash_type) {
 		return HashType::ReversedPrime;
 	} else if (equals_case_insensitive(hash_type, "Rng")) {
 		return HashType::Rng;
+	} else if (equals_case_insensitive(hash_type, "BaseConvert")) {
+		return HashType::BaseConvert;
 	}
 
 	throw std::runtime_error{fmt::format("Invalid hash type: {}", hash_type)};
@@ -151,6 +155,7 @@ std::string to_string(HashType hash_type) {
 		case HashType::CoherentPrime: return "CoherentPrime";
 		case HashType::ReversedPrime: return "ReversedPrime";
 		case HashType::Rng: return "Rng";
+		case HashType::BaseConvert: return "BaseConvert";
 		default: throw std::runtime_error{"Invalid hash type."};
 	}
 }
@@ -225,15 +230,26 @@ bool cuda_supports_virtual_memory(int device) {
 	return supports_vmm != 0;
 }
 
+std::unordered_map<int, cudaDeviceProp>& cuda_device_properties() {
+	static auto* cuda_device_props = new std::unordered_map<int, cudaDeviceProp>{};
+	return *cuda_device_props;
+}
+
+const cudaDeviceProp& cuda_get_device_properties(int device) {
+	if (cuda_device_properties().count(device) == 0) {
+		auto& props = cuda_device_properties()[device];
+		CUDA_CHECK_THROW(cudaGetDeviceProperties(&props, device));
+	}
+
+	return cuda_device_properties().at(device);
+}
+
 std::string cuda_device_name(int device) {
-	cudaDeviceProp props;
-	CUDA_CHECK_THROW(cudaGetDeviceProperties(&props, device));
-	return props.name;
+	return cuda_get_device_properties(device).name;
 }
 
 uint32_t cuda_compute_capability(int device) {
-	cudaDeviceProp props;
-	CUDA_CHECK_THROW(cudaGetDeviceProperties(&props, device));
+	const auto& props = cuda_get_device_properties(device);
 	return props.major * 10 + props.minor;
 }
 
@@ -255,15 +271,11 @@ uint32_t cuda_supported_compute_capability(int device) {
 }
 
 size_t cuda_max_shmem(int device) {
-	cudaDeviceProp props;
-	CUDA_CHECK_THROW(cudaGetDeviceProperties(&props, device));
-	return props.sharedMemPerBlockOptin;
+	return cuda_get_device_properties(device).sharedMemPerBlockOptin;
 }
 
 uint32_t cuda_max_registers(int device) {
-	cudaDeviceProp props;
-	CUDA_CHECK_THROW(cudaGetDeviceProperties(&props, device));
-	return (uint32_t)props.regsPerBlock;
+	return (uint32_t)cuda_get_device_properties(device).regsPerBlock;
 }
 
 size_t cuda_memory_granularity(int device) {
@@ -285,6 +297,15 @@ MemoryInfo cuda_memory_info() {
 	CUDA_CHECK_THROW(cudaMemGetInfo(&info.free, &info.total));
 	info.used = info.total - info.free;
 	return info;
+}
+
+std::string generate_device_code_preamble() {
+	return dfmt(0, R"(
+		#include <tiny-cuda-nn/common_device.h>
+		#include <tiny-cuda-nn/mma.h>
+
+		using namespace tcnn;
+	)");
 }
 
 std::string to_snake_case(const std::string& str) {

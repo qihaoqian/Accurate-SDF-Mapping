@@ -13,7 +13,7 @@ import warnings
 
 import torch
 
-ALL_COMPUTE_CAPABILITIES = [20, 21, 30, 35, 37, 50, 52, 53, 60, 61, 62, 70, 72, 75, 80, 86, 89, 90]
+ALL_COMPUTE_CAPABILITIES = [20, 21, 30, 35, 37, 50, 52, 53, 60, 61, 62, 70, 72, 75, 80, 86, 87, 89, 90, 100, 101, 120]
 
 if not torch.cuda.is_available():
 	raise EnvironmentError("Unknown compute capability. Ensure PyTorch with CUDA support is installed.")
@@ -39,9 +39,14 @@ def _get_system_compute_capability():
 # devices, ensuring that we have no runtime errors.
 system_compute_capability = _get_system_compute_capability()
 
+# Ensure the system's compute capability is represented in the list to avoid
+# total failure if a new capability is released without tiny-cuda-nn being updated.
+ALL_COMPUTE_CAPABILITIES.append(system_compute_capability)
+
 # Try to import the highest compute capability version of tcnn that
 # we can find and is compatible with the system's compute capability.
 _C = None
+
 for cc in reversed(ALL_COMPUTE_CAPABILITIES):
 	if cc > system_compute_capability:
 		# incompatible
@@ -66,6 +71,17 @@ if _C is None:
 # 		warnings.warn(f"tinycudann error: {msg}")
 
 # _C.set_log_callback(_log)
+
+# Set up JIT runtime compilation
+_rtc_dir = os.path.join(os.path.dirname(__file__), "rtc")
+
+_rtc_include_dir = os.path.join(_rtc_dir, "include")
+_C.rtc_set_include_dir(_rtc_include_dir)
+
+_rtc_cache_dir = os.path.join(_rtc_dir, "cache")
+os.makedirs(_rtc_cache_dir, exist_ok=True)
+_C.rtc_set_cache_dir(_rtc_cache_dir)
+
 def _torch_precision(tcnn_precision):
 	if tcnn_precision == _C.Precision.Fp16:
 		return torch.half
@@ -73,6 +89,9 @@ def _torch_precision(tcnn_precision):
 		return torch.float
 	else:
 		raise ValueError(f"Unknown precision {tcnn_precision}")
+
+def supports_jit_fusion():
+	return _C.supports_jit_fusion()
 
 def free_temporary_memory():
 	# Ensure all Python objects (potentially pointing
@@ -205,6 +224,18 @@ class Module(torch.nn.Module):
 
 	def extra_repr(self):
 		return f"n_input_dims={self.n_input_dims}, n_output_dims={self.n_output_dims}, seed={self.seed}, dtype={self.dtype}, hyperparams={self.native_tcnn_module.hyperparams()}"
+
+	@property
+	def jit_fusion(self):
+		return self.native_tcnn_module.jit_fusion
+
+	@jit_fusion.setter
+	def jit_fusion(self, val):
+		self.native_tcnn_module.jit_fusion = val
+
+	@jit_fusion.deleter
+	def jit_fusion(self):
+		raise AttributeError("`jit_fusion` can not be deleted")
 
 class NetworkWithInputEncoding(Module):
 	"""
