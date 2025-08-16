@@ -17,7 +17,7 @@ setup(
             sources=_ext_sources,
             include_dirs=["./include"],
             extra_compile_args={
-                "cxx": ["-g", "-O0", "-I./include", "-DDEBUG"]  # 添加调试符号，禁用优化
+                "cxx": ["-g", "-O0", "-I./include", "-DDEBUG"]  # Add debug symbols, disable optimization
             },
         )
     ],

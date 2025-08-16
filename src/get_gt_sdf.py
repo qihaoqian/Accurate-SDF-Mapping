@@ -6,35 +6,35 @@ import os
 
 def save_sdf_slice(u, bound, save_dir=None, title=None):
     """
-    保存SDF的切片图像用于可视化调试
+    Save SDF slice images for visualization and debugging
     """
     if save_dir is None:
         save_dir = "./debug_slices"
     os.makedirs(save_dir, exist_ok=True)
 
-    # 获取u的形状和边界
+    # Get shape and bounds of u
     x_res, y_res, z_res = u.shape
     x_min, x_max = bound[0]
     y_min, y_max = bound[1]
     z_min, z_max = bound[2]
 
-    # 转换为numpy
+    # Convert to numpy
     if hasattr(u, 'cpu'):
         u_np = u.cpu().numpy()
     else:
         u_np = np.array(u)
 
-    # 创建坐标网格
+    # Create coordinate grid
     x_coords = np.linspace(x_min, x_max, x_res)
     y_coords = np.linspace(y_min, y_max, y_res)
     z_coords = np.linspace(z_min, z_max, z_res)
 
-    # 定义切片配置
+    # Define slice configurations
     slice_configs = [
         {
             'name': 'x_slice',
-            'axis': 0,  # x轴方向
-            'slice_idx': x_res // 2,  # 中间切片
+            'axis': 0,  # x-axis direction
+            'slice_idx': x_res // 2,  # middle slice
             'coord_names': ('Y', 'Z'),
             'title': f'{title} X-Slice (X={x_coords[x_res//2]:.2f})',
             'filename': f'{title}_slice_x.png',
@@ -42,8 +42,8 @@ def save_sdf_slice(u, bound, save_dir=None, title=None):
         },
         {
             'name': 'y_slice',
-            'axis': 1,  # y轴方向
-            'slice_idx': y_res // 2,  # 中间切片
+            'axis': 1,  # y-axis direction
+            'slice_idx': y_res // 2,  # middle slice
             'coord_names': ('X', 'Z'),
             'title': f'{title} Y-Slice (Y={y_coords[y_res//2]:.2f})',
             'filename': f'{title}_slice_y.png',
@@ -51,8 +51,8 @@ def save_sdf_slice(u, bound, save_dir=None, title=None):
         },
         {
             'name': 'z_slice',
-            'axis': 2,  # z轴方向
-            'slice_idx': z_res // 2,  # 中间切片
+            'axis': 2,  # z-axis direction
+            'slice_idx': z_res // 2,  # middle slice
             'coord_names': ('X', 'Y'),
             'title': f'{title} Z-Slice (Z={z_coords[z_res//2]:.2f})',
             'filename': f'{title}_slice_z.png',
@@ -60,7 +60,7 @@ def save_sdf_slice(u, bound, save_dir=None, title=None):
         }
     ]
 
-    # 为每个方向生成切片
+    # Generate slices for each direction
     for config in slice_configs:
         axis = config['axis']
         slice_idx = config['slice_idx']
@@ -69,35 +69,35 @@ def save_sdf_slice(u, bound, save_dir=None, title=None):
         filename = config['filename']
         coord1_vals, coord2_vals = config['coords']
         
-        # 提取切片数据
-        if axis == 0:  # x切片，固定x，变化y,z
+        # Extract slice data
+        if axis == 0:  # x slice, fixed x, varying y,z
             sdf_slice = u_np[slice_idx, :, :]
-        elif axis == 1:  # y切片，固定y，变化x,z
+        elif axis == 1:  # y slice, fixed y, varying x,z
             sdf_slice = u_np[:, slice_idx, :]
-        else:  # z切片，固定z，变化x,y
+        else:  # z slice, fixed z, varying x,y
             sdf_slice = u_np[:, :, slice_idx]
         
-        # 创建坐标网格
+        # Create coordinate grid
         coord1_grid, coord2_grid = np.meshgrid(coord1_vals, coord2_vals, indexing='ij')
         
-        # 绘制图像
+        # Draw image
         plt.figure(figsize=(12, 10))
         
-        # 使用imshow显示SDF切片
+        # Use imshow to display SDF slice
         im = plt.imshow(
-            sdf_slice.T,  # 转置以正确显示方向
+            sdf_slice.T,  # transpose to display direction correctly
             extent=[coord1_vals[0], coord1_vals[-1], coord2_vals[0], coord2_vals[-1]],
             origin='lower',
-            cmap='RdBu_r',  # 红色为正值，蓝色为负值
+            cmap='RdBu_r',  # red for positive values, blue for negative values
             aspect='equal'
         )
         
-        # 添加等高线
+        # Add contour lines
         levels = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
         cs = plt.contour(coord1_grid, coord2_grid, sdf_slice, 
                        levels=levels, colors='black', alpha=0.3, linewidths=0.5)
         
-        # 特别标出零等高线（表面）
+        # Highlight zero contour line (surface)
         zero_contour = plt.contour(coord1_grid, coord2_grid, sdf_slice, 
                                  levels=[0], colors='red', linewidths=2)
         
@@ -107,14 +107,14 @@ def save_sdf_slice(u, bound, save_dir=None, title=None):
         plt.title(title, fontsize=14)
         plt.grid(True, alpha=0.3)
         
-        # 添加数据范围信息到副标题
+        # Add data range information to subtitle
         plt.suptitle(
             f'SDF Range: [{sdf_slice.min():.3f}, {sdf_slice.max():.3f}] | '
             f'Grid: {sdf_slice.shape[0]}×{sdf_slice.shape[1]}',
             fontsize=10, y=0.95
         )
 
-        # 保存图像
+        # Save image
         save_path = os.path.join(save_dir, filename)
         plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
@@ -219,7 +219,7 @@ def get_loss_sdf(pred_sdf_path, gt_sdf_path, invalid_mask_path, positive_mask_pa
     print(f"Number of True values in loss_mask: {np.sum(loss_mask)} / {loss_mask.size} ({np.sum(loss_mask)/loss_mask.size*100:.2f}%)")
     pred_sdf = np.load(pred_sdf_path)
     gt_sdf = np.load(gt_sdf_path)
-    # 定义边界，这里需要根据实际情况设置
+    # Define bounds, need to set according to actual situation
     bound = np.array([[ 7.1,18.9 ],[ 6.8,15.5 ],[ 6.5,13.3 ]])
     save_sdf_slice(gt_sdf, bound, save_dir="../Datasets/Replica/room0", title="GT_SDF")
 
@@ -228,10 +228,10 @@ def get_loss_sdf(pred_sdf_path, gt_sdf_path, invalid_mask_path, positive_mask_pa
     space_diff = np.abs(pred_sdf[space_diff_mask] - gt_sdf[space_diff_mask])
 
     diff = pred_sdf[loss_mask] - gt_sdf[loss_mask]
-    # 构建一个(resx, resy, resz)的diff矩阵，只有被loss_mask过滤后的值，其余为0
+    # Build a (resx, resy, resz) diff matrix, only values filtered by loss_mask, rest are 0
     resx, resy, resz = gt_sdf.shape
     diff_matrix = np.zeros((resx, resy, resz), dtype=gt_sdf.dtype)
-    # loss_mask的形状应与gt_sdf一致
+    # loss_mask shape should match gt_sdf
     diff_matrix[loss_mask] = diff
     save_sdf_slice(diff_matrix, bound, save_dir="../Datasets/Replica/room0", title="Diff SDF")
     
@@ -346,60 +346,60 @@ Zero count: {zero_count} ({zero_count/len(sdf_values)*100:.1f}%)
     plt.show()
 
 if __name__ == "__main__":
-    # # Set parameters
-    # bound = np.array([[ 7.1,18.9 ],[ 6.8,15.5 ],[ 6.5,13.3 ]])
-    # resolution = 256
-    # offset = 10
-    # mesh_path = "/home/qihao/Downloads/room.ply"
+    # Set parameters
+    bound = np.array([[ 7.1,18.9 ],[ 6.8,15.5 ],[ 6.5,13.3 ]])
+    resolution = 256
+    offset = 10
+    mesh_path = "/home/qihao/Downloads/room.ply"
     
-    # # Generate grid points
-    # print("Generating grid points...")
-    # points, res = get_points(bound, resolution, offset)
-    # print(f"Generated {points.shape[0]} points with resolution {res}")
+    # Generate grid points
+    print("Generating grid points...")
+    points, res = get_points(bound, resolution, offset)
+    print(f"Generated {points.shape[0]} points with resolution {res}")
     
-    # # Calculate SDF values
-    # sdf_values, invalid_mask, near_surface_mask = get_sdf(points, mesh_path)
-    # # sdf_values = -sdf_values
+    # Calculate SDF values
+    sdf_values, invalid_mask, near_surface_mask = get_sdf(points, mesh_path)
+    # sdf_values = -sdf_values
     
-    # # Reshape back to 3D grid
-    # x_res, y_res, z_res = res
-    # sdf_grid = sdf_values.reshape(x_res, y_res, z_res)
-    # invalid_mask_grid = invalid_mask.reshape(x_res, y_res, z_res)
-    # positive_mask_grid = sdf_grid >= 0
-    # near_surface_mask_grid = near_surface_mask.reshape(x_res, y_res, z_res)
-    # # Save results
-    # output_file = "../Datasets/Replica/room0/gt_sdf.npy"
-    # invalid_mask_file = "../Datasets/Replica/room0/gt_sdf_invalid_mask.npy"
-    # positive_mask_file = "../Datasets/Replica/room0/gt_sdf_positive_mask.npy"
-    # near_surface_mask_file = "../Datasets/Replica/room0/gt_sdf_near_surface_mask.npy"
-    # np.save(output_file, sdf_grid)
-    # np.save(invalid_mask_file, invalid_mask_grid)
-    # np.save(positive_mask_file, positive_mask_grid)
-    # np.save(near_surface_mask_file, near_surface_mask_grid)
-    # print(f"SDF grid saved to {output_file}")
-    # print(f"Invalid mask saved to {invalid_mask_file}")
-    # print(f"Invalid mask statistics:")
-    # print(f"  Total invalid points: {np.sum(invalid_mask)} / {len(invalid_mask)} ({np.sum(invalid_mask)/len(invalid_mask)*100:.2f}%)")
-    # print(f"  Invalid points in grid: {np.sum(invalid_mask_grid)} / {invalid_mask_grid.size}")
+    # Reshape back to 3D grid
+    x_res, y_res, z_res = res
+    sdf_grid = sdf_values.reshape(x_res, y_res, z_res)
+    invalid_mask_grid = invalid_mask.reshape(x_res, y_res, z_res)
+    positive_mask_grid = sdf_grid >= 0
+    near_surface_mask_grid = near_surface_mask.reshape(x_res, y_res, z_res)
+    # Save results
+    output_file = "../Datasets/Replica/room0/gt_sdf.npy"
+    invalid_mask_file = "../Datasets/Replica/room0/gt_sdf_invalid_mask.npy"
+    positive_mask_file = "../Datasets/Replica/room0/gt_sdf_positive_mask.npy"
+    near_surface_mask_file = "../Datasets/Replica/room0/gt_sdf_near_surface_mask.npy"
+    np.save(output_file, sdf_grid)
+    np.save(invalid_mask_file, invalid_mask_grid)
+    np.save(positive_mask_file, positive_mask_grid)
+    np.save(near_surface_mask_file, near_surface_mask_grid)
+    print(f"SDF grid saved to {output_file}")
+    print(f"Invalid mask saved to {invalid_mask_file}")
+    print(f"Invalid mask statistics:")
+    print(f"  Total invalid points: {np.sum(invalid_mask)} / {len(invalid_mask)} ({np.sum(invalid_mask)/len(invalid_mask)*100:.2f}%)")
+    print(f"  Invalid points in grid: {np.sum(invalid_mask_grid)} / {invalid_mask_grid.size}")
     
-    # # Print statistics
-    # print(f"SDF statistics:")
-    # print(f"  Shape: {sdf_grid.shape}")
-    # print(f"  Min: {sdf_values.min():.4f}")
-    # print(f"  Max: {sdf_values.max():.4f}")
-    # print(f"  Mean: {sdf_values.mean():.4f}")
-    # print(f"  Std: {sdf_values.std():.4f}")
-    # print(f"  Points inside mesh (sdf < 0): {np.sum(sdf_values < 0)}")
-    # print(f"  Points outside mesh (sdf > 0): {np.sum(sdf_values > 0)}")
-    # print(f"  Points on surface (|sdf| < 1e-6): {np.sum(np.abs(sdf_values) < 1e-6)}")
-    # print(f"  Points at clipping boundary (|sdf| = 30): {np.sum(np.abs(sdf_values) >= 29.99)}")
+    # Print statistics
+    print(f"SDF statistics:")
+    print(f"  Shape: {sdf_grid.shape}")
+    print(f"  Min: {sdf_values.min():.4f}")
+    print(f"  Max: {sdf_values.max():.4f}")
+    print(f"  Mean: {sdf_values.mean():.4f}")
+    print(f"  Std: {sdf_values.std():.4f}")
+    print(f"  Points inside mesh (sdf < 0): {np.sum(sdf_values < 0)}")
+    print(f"  Points outside mesh (sdf > 0): {np.sum(sdf_values > 0)}")
+    print(f"  Points on surface (|sdf| < 1e-6): {np.sum(np.abs(sdf_values) < 1e-6)}")
+    print(f"  Points at clipping boundary (|sdf| = 30): {np.sum(np.abs(sdf_values) >= 29.99)}")
     
-    # # Display SDF value distribution
-    # print(f"SDF value distribution:")
-    # percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
-    # sdf_percentiles = np.percentile(sdf_values, percentiles)
-    # for p, val in zip(percentiles, sdf_percentiles):
-    #     print(f"  {p:2d}th percentile: {val:.4f}")
+    # Display SDF value distribution
+    print(f"SDF value distribution:")
+    percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
+    sdf_percentiles = np.percentile(sdf_values, percentiles)
+    for p, val in zip(percentiles, sdf_percentiles):
+        print(f"  {p:2d}th percentile: {val:.4f}")
 
     gt_sdf_path = "../Datasets/Replica/room0/gt_sdf.npy"
     invalid_mask_path = "../Datasets/Replica/room0/gt_sdf_invalid_mask.npy"

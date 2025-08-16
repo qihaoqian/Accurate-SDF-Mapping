@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-重建Mesh脚本
-从训练好的checkpoint加载模型并重建3D mesh
+Mesh Reconstruction Script
+Load model from trained checkpoint and reconstruct 3D mesh
 
-使用方法:
+Usage:
 python reconstruct_mesh.py configs/replica/room_0.yaml --ckpt_path logs/replica/room0/2025-08-06-19-44-27/ckpt/final_ckpt.pth
 
-或者使用默认路径:
+Or use default path:
 python reconstruct_mesh.py configs/replica/room_0.yaml
 """
 
@@ -14,7 +14,7 @@ import os
 import sys
 import torch
 
-# 添加路径
+# Add paths
 sys.path.insert(0, ".")
 sys.path.insert(0, os.path.abspath('src'))
 
@@ -23,47 +23,47 @@ from src.utils.inference import load_and_extract_mesh
 
 
 def main():
-    # 使用项目原有的参数解析器
+    # Use project's original argument parser
     parser = get_parser()
     
-    # 添加额外的mesh重建参数
+    # Add additional mesh reconstruction parameters
     parser.add_argument('--ckpt_path', type=str, 
                        default='logs/replica/room0/2025-08-06-19-44-27/ckpt/final_ckpt.pth',
-                       help='checkpoint文件路径')
+                       help='checkpoint file path')
     parser.add_argument('--mesh_res', type=int, default=256,
-                       help='mesh分辨率 (默认: 256)')
+                       help='mesh resolution (default: 256)')
     parser.add_argument('--output_dir', type=str, default=None,
-                       help='输出目录 (默认: checkpoint同级的mesh目录)')
+                       help='output directory (default: mesh directory at same level as checkpoint)')
     parser.add_argument('--gpu', type=int, default=0,
-                       help='GPU设备ID (默认: 0)')
+                       help='GPU device ID (default: 0)')
     
     args = parser.parse_args()
     
-    # 设置GPU
+    # Set GPU
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     
-    # 检查文件是否存在
+    # Check if files exist
     if not os.path.exists(args.ckpt_path):
-        print(f"❌ Checkpoint文件不存在: {args.ckpt_path}")
+        print(f"❌ Checkpoint file does not exist: {args.ckpt_path}")
         return
     
     if not os.path.exists(args.config):
-        print(f"❌ 配置文件不存在: {args.config}")
+        print(f"❌ Config file does not exist: {args.config}")
         return
     
-    print(f"🔧 使用GPU: {args.gpu}")
+    print(f"🔧 Using GPU: {args.gpu}")
     print(f"📄 Checkpoint: {args.ckpt_path}")
-    print(f"⚙️  配置文件: {args.config}")
-    print(f"🎯 Mesh分辨率: {args.mesh_res}")
+    print(f"⚙️  Config file: {args.config}")
+    print(f"🎯 Mesh resolution: {args.mesh_res}")
     
     try:
-        # 重建mesh，如果内存不足则自动降低分辨率
+        # Reconstruct mesh, automatically reduce resolution if out of memory
         current_res = args.mesh_res
         success = False
         
-        while current_res >= 64 and not success:  # 最低分辨率64
+        while current_res >= 64 and not success:  # minimum resolution 64
             try:
-                print(f"\n🎯 尝试分辨率: {current_res}")
+                print(f"\n🎯 Trying resolution: {current_res}")
                 mesh, output_path = load_and_extract_mesh(
                     ckpt_path=args.ckpt_path,
                     args=args,
@@ -72,31 +72,31 @@ def main():
                 )
                 success = True
                 
-                print(f"\n🎉 重建完成！Mesh已保存到: {output_path}")
-                print(f"📊 最终使用分辨率: {current_res}")
-                print(f"📈 你可以使用MeshLab、Blender或其他3D软件查看mesh")
+                print(f"\n🎉 Reconstruction completed! Mesh saved to: {output_path}")
+                print(f"📊 Final resolution used: {current_res}")
+                print(f"📈 You can view the mesh using MeshLab, Blender or other 3D software")
                 
             except torch.cuda.OutOfMemoryError:
-                print(f"⚠️  分辨率 {current_res} 内存不足，尝试降低分辨率...")
+                print(f"⚠️  Resolution {current_res} out of memory, trying to reduce resolution...")
                 current_res = current_res // 2
                 torch.cuda.empty_cache()
                 
                 if current_res < 64:
-                    print("❌ 已达到最低分辨率64，仍然内存不足")
-                    print("💡 建议:")
-                    print("   1. 关闭其他GPU程序")
-                    print("   2. 使用更大GPU内存的设备")
-                    print("   3. 手动设置更低的mesh_res (如32)")
+                    print("❌ Reached minimum resolution 64, still out of memory")
+                    print("💡 Suggestions:")
+                    print("   1. Close other GPU programs")
+                    print("   2. Use device with larger GPU memory")
+                    print("   3. Manually set lower mesh_res (e.g. 32)")
                     break
                 else:
-                    print(f"🔄 降低到分辨率: {current_res}")
+                    print(f"🔄 Reducing to resolution: {current_res}")
         
         if not success and current_res >= 64:
-            raise Exception("无法在任何分辨率下完成重建")
+            raise Exception("Cannot complete reconstruction at any resolution")
             
     except Exception as e:
         if "OutOfMemoryError" not in str(e):
-            print(f"❌ 重建失败: {str(e)}")
+            print(f"❌ Reconstruction failed: {str(e)}")
             import traceback
             traceback.print_exc()
 

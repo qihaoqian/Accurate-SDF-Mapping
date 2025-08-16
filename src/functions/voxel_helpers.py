@@ -570,7 +570,7 @@ def ray_sample(intersection_outputs, step_size=0.01, fixed=False):
             intersection_outputs["max_depth"] -
             intersection_outputs["min_depth"]
     ).masked_fill(intersection_outputs["intersected_voxel_idx"].eq(-1),
-                  0)  # dist 算的是ray在voxel内的距离，下面这个采样等于说就是vox内ray短的少采样
+                  0)  # dist calculates ray distance within voxel, sampling below means shorter rays in voxel get fewer samples
     intersection_outputs["probs"] = dists / dists.sum(dim=-1, keepdim=True)
     intersection_outputs["steps"] = dists.sum(-1) / step_size
 
@@ -703,14 +703,14 @@ def ray_sample_isdf(
 
 def edge_favored_samples(bound, U, alpha=0.5, seed=None):
     """
-    在 box bound 内采样，边缘多（Beta(alpha,alpha)，alpha<1 U 形分布）。
-    bound: array-like (3,2), 每维的 [low, high]
-    U: 样本数
-    alpha: Beta 分布参数，<1 边缘更重
+    Sample within box bound, with more samples at edges (Beta(alpha,alpha), alpha<1 U-shaped distribution).
+    bound: array-like (3,2), [low, high] for each dimension
+    U: number of samples
+    alpha: Beta distribution parameter, <1 gives more weight to edges
     """
     rng = np.random.default_rng(seed)
     bound = np.asarray(bound, dtype=float)  # (3,2)
-    # 采样两个 Gamma(alpha,1)，再归一化得到 Beta(alpha,alpha)
+    # Sample two Gamma(alpha,1), then normalize to get Beta(alpha,alpha)
     x = rng.gamma(alpha, 1.0, size=(U, 3))
     y = rng.gamma(alpha, 1.0, size=(U, 3))
     u = x / (x + y + 1e-16)  # shape (U,3)

@@ -33,7 +33,7 @@ sample_specs:
 
 mapper_specs:
   start_frame: 0
-  end_frame: -1
+  end_frame: 5
   N_rays_each: 2048 # mapping's sampling ray
   num_vertexes: 200000
   inflate_margin_ratio: 0.1

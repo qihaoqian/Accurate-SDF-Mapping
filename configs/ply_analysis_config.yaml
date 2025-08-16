@@ -1,0 +1,22 @@
+# PLY文件分析配置文件
+# 用于配置PLY文件分析脚本的参数
+
+# 要分析的PLY文件路径
+file: "Datasets/Replica/room0_mesh.ply"
+
+# 是否显示详细信息
+verbose: true
+
+# 输出结果到JSON文件（可选）
+output: "results/room0_analysis.json"
+
+# 分析选项
+analysis_options:
+  # 是否计算体积
+  calculate_volume: true
+  
+  # 是否计算表面积
+  calculate_surface_area: true
+  
+  # 是否检查网格是否封闭
+  check_watertight: true 

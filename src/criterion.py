@@ -41,7 +41,7 @@ class Criterion(nn.Module):
             loss += self.sign_weight_free * sign_loss_free + self.sign_weight_occ * sign_loss_occ
             loss_dict["sign_loss_free"] = sign_loss_free.item()
             loss_dict["sign_loss_occ"] = sign_loss_occ.item()
-        # 计算eikonal loss和heat loss
+        # Compute eikonal loss and heat loss
         if self.eikonal_surface_weight > 0 or self.eikonal_space_weight > 0:
             eikonal_loss_surface, eikonal_loss_space = self.compute_eikonal_loss(grad, surface_mask)
             loss += self.eikonal_surface_weight * eikonal_loss_surface + self.eikonal_space_weight * eikonal_loss_space
@@ -89,7 +89,7 @@ class Criterion(nn.Module):
     
     def compute_sign_loss(self, positive_sdf_mask, negative_sdf_mask, pred_sdf):
         """
-        计算sign loss - 只在free space上计算
+        Compute sign loss - only computed on free space
         """
         free_pred = pred_sdf[positive_sdf_mask.squeeze()]
         occ_pred = pred_sdf[negative_sdf_mask.squeeze()]
@@ -99,11 +99,11 @@ class Criterion(nn.Module):
         
     def compute_eikonal_loss(self, grad, surface_mask):
         """
-        计算eikonal loss - 梯度模长应该接近1
+        Compute eikonal loss - gradient magnitude should be close to 1
         
         Args:
-            gradient (tensor): 梯度 (N_rays, N_samples, 3)
-            gradient_valid_mask (tensor): 梯度有效性mask (N_rays, N_samples)
+            gradient (tensor): gradient (N_rays, N_samples, 3)
+            gradient_valid_mask (tensor): gradient validity mask (N_rays, N_samples)
             
         Returns:
             eikonal_loss (tensor): eikonal loss
@@ -115,21 +115,21 @@ class Criterion(nn.Module):
     
     def compute_heat_loss(self, ray_sample_mask, pred_sdf, grad, heat_lambda=4):
         """
-        计算heat loss - 只在free space上计算
+        Compute heat loss - only computed on free space
         
         Args:
-            z_vals (tensor): 采样点深度 (N_rays, N_samples)
-            gt_depth (tensor): GT深度 (N_rays)
-            pred_sdf (tensor): 预测SDF (N_rays, N_samples)
-            grad (tensor): 梯度 (N_rays, N_samples, 3)
-            grad_valid_mask (tensor): 梯度有效性mask (N_rays, N_samples)
-            heat_lambda (float): heat kernel参数
+            z_vals (tensor): sampling point depth (N_rays, N_samples)
+            gt_depth (tensor): GT depth (N_rays)
+            pred_sdf (tensor): predicted SDF (N_rays, N_samples)
+            grad (tensor): gradient (N_rays, N_samples, 3)
+            grad_valid_mask (tensor): gradient validity mask (N_rays, N_samples)
+            heat_lambda (float): heat kernel parameter
             
         Returns:
             heat_loss (tensor): heat loss
         """
         
-        # 使用组合mask选择有效的梯度和SDF值
+        # Use combined mask to select valid gradients and SDF values
         valid_grad = grad[ray_sample_mask.squeeze()]
         valid_sdf = pred_sdf[ray_sample_mask.squeeze()]
         
@@ -142,14 +142,14 @@ class Criterion(nn.Module):
     
     def find_nearest_neighbor(self, points_xyz, surface_mask, perturbation_mask, batch_size=10000):
         """
-        找到points_xyz中每个space点最近的surface点
-        使用分批计算防止OOM
+        Find the nearest surface point for each space point in points_xyz
+        Use batch computation to prevent OOM
         
         Args:
-            points_xyz: 所有点的坐标
-            surface_mask: surface点的mask
-            perturbation_mask: perturbation点的mask  
-            batch_size: 分批大小，默认1000
+            points_xyz: coordinates of all points
+            surface_mask: mask of surface points
+            perturbation_mask: mask of perturbation points  
+            batch_size: batch size, default 1000
         """
         valid_mask = ~surface_mask.squeeze() & ~perturbation_mask.squeeze()
         X_surf = points_xyz[surface_mask.squeeze()]
@@ -157,19 +157,19 @@ class Criterion(nn.Module):
         
         n_space = X_space.shape[0]
         
-        # 分批计算
+        # Batch computation
         nn_indices = []
         with torch.no_grad():
             for i in range(0, n_space, batch_size):
                 end_idx = min(i + batch_size, n_space)
                 X_space_batch = X_space[i:end_idx]
                 
-                # 计算当前批次与所有surface点的距离
+                # Calculate distance between current batch and all surface points
                 d2_batch = torch.cdist(X_space_batch, X_surf)
                 nn_idx_batch = d2_batch.argmin(dim=1)
                 nn_indices.append(nn_idx_batch)
         
-        # 合并所有批次的结果
+        # Merge results from all batches
         nn_idx_space = torch.cat(nn_indices, dim=0)
         X_nn_space = X_surf[nn_idx_space]
         dir_gt_space = X_space - X_nn_space
@@ -177,9 +177,9 @@ class Criterion(nn.Module):
     
     def compute_projection_loss(self, dir_gt_space, pred_sdf, surface_mask, perturbation_mask):
         """
-        计算投影loss - 只在非surface且非perturbation上计算
+        Compute projection loss - only computed on non-surface and non-perturbation points
         """
-        # 排除surface和perturbation的点
+        # Exclude surface and perturbation points
         valid_mask = ~surface_mask.squeeze() & ~perturbation_mask.squeeze()
         dist_space = dir_gt_space.norm(dim=1)  # (N_space,)
         pred_sdf_space = pred_sdf[valid_mask]
@@ -189,7 +189,7 @@ class Criterion(nn.Module):
 
     def compute_grad_dir_loss(self, grad, dir_gt_space, surface_mask):
         """
-        计算grad_dir loss - 只在非surface上计算
+        Compute grad_dir loss - only computed on non-surface points
         """
         dir_gt_space_normed = dir_gt_space / (dir_gt_space.norm(dim=1, keepdim=True) + 1e-8)
         grad_space = grad[~surface_mask.squeeze()]

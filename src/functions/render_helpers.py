@@ -449,7 +449,7 @@ def render_rays(
     }
 
 
-def finite_diff_grad_combined_safe(chunk_samples, map_states, voxel_size, sdf_network, h1=1e-4):
+def finite_diff_grad_combined_safe(X, map_states, voxel_size, sdf_network, h1=1e-4):
     """
     Safe finite difference gradient computation, ensuring gradients are computed only when perturbations 
     in all xyz directions do not go out of bounds
@@ -466,8 +466,6 @@ def finite_diff_grad_combined_safe(chunk_samples, map_states, voxel_size, sdf_ne
         grad_magnitude (tensor): gradient magnitude [N_points, 1]
         valid_mask (tensor): valid gradient mask [N_points]
     """
-    X = chunk_samples['sampled_point_xyz']  # [N_points, 3]
-    
     def safe_combined_forward_subset(xyz_points, voxel_idx_subset):
         """Forward propagation only for valid point subset"""
         if xyz_points.shape[0] == 0:
@@ -484,8 +482,6 @@ def finite_diff_grad_combined_safe(chunk_samples, map_states, voxel_size, sdf_ne
             
         return final_sdf
             
-    # Adaptive step size: ensure perturbed points remain within voxels
-    adaptive_h1 = min(h1, voxel_size * 0.1)  # Limit step size to not exceed 10% of voxel size
     
     # Pre-check if perturbations in all directions are within voxels
     # Create all possible perturbations for xyz three directions
@@ -493,7 +489,7 @@ def finite_diff_grad_combined_safe(chunk_samples, map_states, voxel_size, sdf_ne
     for i in range(3):  # x, y, z three dimensions
         for direction in [1, -1]:  # positive and negative directions
             offset = torch.zeros_like(X)
-            offset[:, i] = direction * adaptive_h1
+            offset[:, i] = direction * h1
             all_offsets.append(X + offset)
     
     # Check if all perturbations are within voxels
@@ -515,14 +511,14 @@ def finite_diff_grad_combined_safe(chunk_samples, map_states, voxel_size, sdf_ne
     for i in range(3):  # For x, y, z three dimensions
         # Create offset vector
         offset = torch.zeros_like(X)
-        offset[:, i] = adaptive_h1
+        offset[:, i] = h1
         
         # Compute SDF values for positive and negative perturbations (only for valid points)
         sdf_plus = safe_combined_forward_subset(X + offset, voxel_idx_stack[2*i,:])
         sdf_minus = safe_combined_forward_subset(X - offset, voxel_idx_stack[2*i+1,:])
         
         # Use central difference formula to compute gradient
-        grad_i = (sdf_plus - sdf_minus) / (2 * adaptive_h1)
+        grad_i = (sdf_plus - sdf_minus) / (2 * h1)
         
         grad[:, i] = grad_i.squeeze(-1)
         
@@ -652,7 +648,7 @@ def bundle_adjust_frames(
             
             # Use higher precision for gradient computation
             grad = finite_diff_grad_combined_safe(
-                chunk_samples, map_states, voxel_size, sdf_network, h1=h1
+                chunk_samples['sampled_point_xyz'], map_states, voxel_size, sdf_network, h1=h1
             )
             
         # Combine all outputs
@@ -706,7 +702,7 @@ def find_voxel_idx(points, map_states):
     device = points.device
     tree   = map_states["voxel_structure"].to(device)      # [M, 9]
     centers= map_states["voxel_center_xyz"].to(device)     # [M, 3]
-    size = map_states["voxels"][:, -1].to(device)
+    node_size = map_states["voxels"][:, -1].to(device)
     
     
     N = points.shape[0]

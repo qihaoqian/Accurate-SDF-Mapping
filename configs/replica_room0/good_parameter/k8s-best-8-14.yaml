@@ -3,7 +3,7 @@ decoder: parallel_hash_net
 dataset: replica
 update_pose: False
 
-exp_name: k8s-best-8-14
+exp_name: logs-k8s/good_parameter/k8s-best-8-14
 
 criteria:
   boundary_loss_weight: 1000

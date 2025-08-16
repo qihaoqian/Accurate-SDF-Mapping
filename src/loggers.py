@@ -82,7 +82,7 @@ class BasicLogger:
             ind)), (rgb).astype(np.uint8))
         cv2.imwrite(osp.join(self.img_dir, "{:05d}.png".format(
             ind)), (depth * 5000).astype(np.uint16))
-
+    
     def log_images(self, ind, gt_rgb, gt_depth, rgb, depth):
         gt_depth_np = gt_depth.detach().cpu().numpy()
         gt_color_np = gt_rgb.detach().cpu().numpy()

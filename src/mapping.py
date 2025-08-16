@@ -2,7 +2,6 @@ import random
 
 import numpy as np
 import torch
-from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 import os
 
@@ -29,7 +28,6 @@ class Mapping:
         debug_args = args.debug_args
         data_specs = args.data_specs
         self.sample_specs = args.sample_specs
-        self.run_ros = args.run_ros
         self.writer = SummaryWriter(log_dir=self.logger.misc_dir)
 
         # get data stream
@@ -72,19 +70,7 @@ class Mapping:
         self.insert_method = mapper_specs["insert_method"]
         self.insert_ratio = mapper_specs["insert_ratio"]
         self.num_vertexes = mapper_specs["num_vertexes"]
-        if self.run_ros:
-            ros_args = args.ros_args
-            self.intrinsic = np.eye(3)
-            self.intrinsic[0, 0] = ros_args["intrinsic"][0]
-            self.intrinsic[1, 1] = ros_args["intrinsic"][1]
-            self.intrinsic[0, 2] = ros_args["intrinsic"][2]
-            self.intrinsic[1, 2] = ros_args["intrinsic"][3]
-            print("intrinsic: ", self.intrinsic)
-            self.color_topic = ros_args["color_topic"]
-            self.depth_topic = ros_args["depth_topic"]
-            self.pose_topic = ros_args["pose_topic"]
 
-        self.use_gt = data_specs["use_gt"]
         self.max_distance = data_specs["max_depth"]
 
         self.render_freq = debug_args["render_freq"]
@@ -110,33 +96,10 @@ class Mapping:
                                 {'params': self.vector_features, 'lr': 1e-2}]
 
         self.optim = torch.optim.Adam(self.optimize_params)
-        self.scaler = torch.cuda.amp.GradScaler()
+        self.scaler = torch.amp.GradScaler('cuda')
 
         self.frame_poses = []
         self.bound = args.decoder_specs["bound"]
-
-    def callback(self, color, depth, pose_vins):
-        update_pose = False
-        bridge = CvBridge()
-        color_image = bridge.imgmsg_to_cv2(color, desired_encoding="passthrough")
-        depth_image = bridge.imgmsg_to_cv2(depth, desired_encoding="passthrough")
-        q = pose_vins.pose.pose.orientation
-        dcm = Rotation.from_quat(np.array([q.x, q.y, q.z, q.w])).as_matrix()
-        trans = pose_vins.pose.pose.position
-        trans = np.array([trans.x, trans.y, trans.z])
-        pose = np.eye(4)
-        pose[:3, :3] = dcm
-        pose[:3, 3] = trans
-        depth_image = depth_image * 0.001
-        if self.max_distance > 0:
-            depth_image[(depth_image > self.max_distance)] = 0
-        color_image = color_image / 256
-
-        tracked_frame = RGBDFrame(self.idx, color_image, depth_image, K=self.intrinsic, offset=self.offset,
-                                  ref_pose=pose)
-        self.mapping_step(self.idx, tracked_frame, update_pose)
-        self.idx += 1
-        print("idx: ", self.idx)
 
     def mapping_step(self, frame_id, tracked_frame, update_pose, epoch):
         ######################
@@ -202,10 +165,8 @@ class Mapping:
         epoch = 0
         for frame_id in progress_bar:
             data_in = self.data_stream[frame_id]
-            if self.use_gt:
-                tracked_frame = RGBDFrame(*data_in[:-1], offset=self.offset, ref_pose=data_in[-1])
-            else:
-                tracked_frame = RGBDFrame(*data_in[:-1], offset=self.offset, ref_pose=self.tracked_pose.clone())
+            tracked_frame = RGBDFrame(*data_in[:-1], offset=self.offset, ref_pose=data_in[-1])
+
             if update_pose is False:
                 tracked_frame.d_pose.requires_grad_(False)
             if tracked_frame.ref_pose.isinf().any():
@@ -222,26 +183,25 @@ class Mapping:
         print("******* extracting final mesh *******")
         pose = self.get_updated_poses()
         self.kf_graph = None
-        # 需要重写extract_mesh函数
+        # Need to rewrite extract_mesh function
         mesh, u, u_priors, u_hash_features = self.extract_mesh(res=self.mesh_res, map_states=self.map_states)
         self.logger.log_ckpt(self, name="final_ckpt.pth")
         pose = np.asarray(pose)
         pose[:, 0:3, 3] -= self.offset
         self.logger.log_numpy_data(pose, "frame_poses")
-        # self.logger.log_mesh(mesh)
         self.logger.log_numpy_data(self.extract_voxels(map_states=self.map_states), "final_voxels")
         
-        # 保存SDF切片图用于debug
-        save_dir = self.logger.misc_dir  # 保存到misc目录下
+        # Save SDF slice images for debugging
+        save_dir = self.logger.misc_dir  # Save to misc directory
 
         self.save_sdf_slice(u, save_dir=save_dir, title="SDF")
         self.save_sdf_slice(u_priors, save_dir=save_dir, title="SDF Priors")
         self.save_sdf_slice(u_hash_features, save_dir=save_dir, title="Hash Features")
-        # 保存u到文件，便于后续分析
+        # Save u to file for subsequent analysis
         np.save(os.path.join(save_dir, "sdf_u.npy"), u.cpu().numpy() if hasattr(u, "cpu") else u)
         np.save(os.path.join(save_dir, "sdf_priors.npy"), u_priors.cpu().numpy() if hasattr(u_priors, "cpu") else u_priors)
         np.save(os.path.join(save_dir, "hash_features.npy"), u_hash_features.cpu().numpy() if hasattr(u_hash_features, "cpu") else u_hash_features)
-        print(f"SDF体素网格u已保存到: {os.path.join(save_dir, 'sdf_u.npy')}")
+        print(f"SDF voxel grid u saved to: {os.path.join(save_dir, 'sdf_u.npy')}")
         
         print("******* mapping process died *******")
 
@@ -342,10 +302,9 @@ class Mapping:
 
     def create_voxels(self, frame):
         points_raw = frame.get_points().cuda()
-        if self.use_gt:
-            pose = frame.get_ref_pose().cuda()
-        else:
-            pose = frame.get_ref_pose().cuda() @ frame.get_d_pose().cuda()
+
+        pose = frame.get_ref_pose().cuda()
+
         points = points_raw @ pose[:3, :3].transpose(-1, -2) + pose[:3, 3]  # change to world frame (Rx)^T = x^T R^T
 
         voxels = torch.div(points, self.voxel_size, rounding_mode='floor')  # Divides each element
@@ -410,16 +369,16 @@ class Mapping:
         y_min, y_max = bound[1]
         z_min, z_max = bound[2]
         
-        # 计算每个维度的范围
+        # Calculate range for each dimension
         x_range = x_max - x_min
         y_range = y_max - y_min
         z_range = z_max - z_min
         
-        # 找到最小范围作为基准，确保点间距一致
+        # Find minimum range as baseline to ensure consistent point spacing
         min_range = min(x_range, y_range, z_range)
-        spacing = min_range / (res - 1)  # 基准点间距
+        spacing = min_range / (res - 1)  # baseline point spacing
         
-        # 根据每个维度的范围和基准点间距计算各自的分辨率
+        # Calculate resolution for each dimension based on range and baseline spacing
         x_res = int(x_range / spacing) + 1
         y_res = int(y_range / spacing) + 1
         z_res = int(z_range / spacing) + 1
@@ -433,8 +392,8 @@ class Mapping:
         points_voxel_idx = find_voxel_idx(points, map_states)
 
         
-        # 分批处理点云，避免GPU内存不足
-        batch_size = 100000  # 根据GPU内存调整这个值
+        # Process point cloud in batches to avoid GPU memory insufficiency
+        batch_size = 100000  # Adjust this value based on GPU memory
         total_points = points.shape[0]
         sdf_results = []
         sdf_priors = []
@@ -447,30 +406,29 @@ class Mapping:
                 end_idx = min(i + batch_size, total_points)
                 batch_points = points[i:end_idx]
                 
-                # 为当前批次查找体素索引
+                # Find voxel indices for current batch
                 batch_voxel_idx = points_voxel_idx[i:end_idx]
                 
-                # 获取特征和预测SDF
+                # Get features and predict SDF
                 batch_sdf_priors = get_features(batch_points, batch_voxel_idx, map_states, self.voxel_size)
                 batch_hash_features = sdf_network(batch_points)
                 sdf_priors_features = batch_sdf_priors['sdf_priors'].squeeze(1)
                 batch_sdf_pred = sdf_priors_features + batch_hash_features['sdf']
                 
-                # 立即转移到CPU以释放GPU内存
+                # Immediately transfer to CPU to free GPU memory
                 sdf_results.append(batch_sdf_pred.cpu())
                 sdf_priors.append(sdf_priors_features.cpu())
                 hash_features.append(batch_hash_features['sdf'].cpu())
                 
-                # 手动清理GPU上的临时变量
+                # Manually clean up temporary variables on GPU
                 del batch_sdf_priors, batch_hash_features, batch_sdf_pred
                 
-                # 每10个batch清理一次GPU缓存
+                # Clear GPU cache every 10 batches
                 if (i//batch_size + 1) % 10 == 0:
                     torch.cuda.empty_cache()
-                
-                print(f"  Processed batch {i//batch_size + 1}/{(total_points + batch_size - 1)//batch_size}")
+                    print(f"  Processed batch {i//batch_size + 1}/{(total_points + batch_size - 1)//batch_size}")
             
-            # 拼接所有批次的结果
+            # Concatenate results from all batches
             sdf_pred = torch.cat(sdf_results, dim=0)
             sdf_priors = torch.cat(sdf_priors, dim=0)
             hash_features = torch.cat(hash_features, dim=0)
@@ -479,7 +437,7 @@ class Mapping:
         u_hash_features = hash_features.reshape(x_res, y_res, z_res).cpu().numpy()
         import mcubes, trimesh
         vertices, triangles = mcubes.marching_cubes(u, 0)
-        # 正确的放缩逻辑：将网格索引转换为实际坐标
+        # Correct scaling logic: convert grid indices to actual coordinates
         vertices = vertices * [x_range/(x_res-1), y_range/(y_res-1), z_range/(z_res-1)] + [x_min, y_min, z_min] -self.offset
         vertices_priors, triangles_priors = mcubes.marching_cubes(u_priors, 0)
         vertices_priors = vertices_priors * [x_range/(x_res-1), y_range/(y_res-1), z_range/(z_res-1)] + [x_min, y_min, z_min] -self.offset
@@ -489,12 +447,13 @@ class Mapping:
         mesh_priors = trimesh.Trimesh(vertices_priors, triangles_priors)
         mesh.invert()
         mesh_priors.invert()
-        out_path = os.path.join(self.logger.mesh_dir, f"mesh_{res}.obj")
-        mesh.export(out_path)
-        out_path_priors = os.path.join(self.logger.mesh_dir, f"mesh_{res}_priors.obj")
-        mesh_priors.export(out_path_priors)
-        print(f"==> mesh saved to {out_path}")
-        print(f"==> mesh_priors saved to {out_path_priors}")
+        if self.args.save_mesh:
+            out_path = os.path.join(self.logger.mesh_dir, f"mesh_{res}.obj")
+            mesh.export(out_path)
+            out_path_priors = os.path.join(self.logger.mesh_dir, f"mesh_{res}_priors.obj")
+            mesh_priors.export(out_path_priors)
+            print(f"==> mesh saved to {out_path}")
+            print(f"==> mesh_priors saved to {out_path_priors}")
         return mesh, u, u_priors, u_hash_features
 
     @torch.no_grad()
@@ -513,20 +472,13 @@ class Mapping:
         """
         save per-frame voxel, mesh and pose
         """
-        if self.use_gt:
-            pose = tracked_frame.get_ref_pose().detach().cpu().numpy()
-        else:
-            pose = tracked_frame.get_ref_pose().detach().cpu().numpy() @ tracked_frame.get_d_pose().detach().cpu().numpy()
+        pose = tracked_frame.get_ref_pose().detach().cpu().numpy()
         pose[:3, 3] -= self.offset
         frame_poses = self.get_updated_poses()
         mesh = self.extract_mesh(res=8, clean_mesh=True)
         voxels = self.extract_voxels(map_states=self.map_states).detach().cpu().numpy()
-        if self.use_gt:
-            kf_poses = [p.get_ref_pose().detach().cpu().numpy()
-                        for p in self.kf_graph]
-        else:
-            kf_poses = [p.get_ref_pose().detach().cpu().numpy() @ p.get_d_pose().detach().cpu().numpy()
-                        for p in self.kf_graph]
+        kf_poses = [p.get_ref_pose().detach().cpu().numpy()
+                    for p in self.kf_graph]
 
         for f in frame_poses:
             f[:3, 3] -= self.offset
@@ -557,30 +509,30 @@ class Mapping:
             save_dir = "./debug_slices"
         os.makedirs(save_dir, exist_ok=True)
 
-        # 获取u的形状和边界
+        # Get shape and bounds of u
         x_res, y_res, z_res = u.shape
         bound = self.bound
         x_min, x_max = bound[0]
         y_min, y_max = bound[1]
         z_min, z_max = bound[2]
 
-        # 转换为numpy
+        # Convert to numpy
         if hasattr(u, 'cpu'):
             u_np = u.cpu().numpy()
         else:
             u_np = np.array(u)
 
-        # 创建坐标网格
+        # Create coordinate grid
         x_coords = np.linspace(x_min, x_max, x_res)
         y_coords = np.linspace(y_min, y_max, y_res)
         z_coords = np.linspace(z_min, z_max, z_res)
 
-        # 定义切片配置
+        # Define slice configurations
         slice_configs = [
             {
                 'name': 'x_slice',
-                'axis': 0,  # x轴方向
-                'slice_idx': x_res // 2,  # 中间切片
+                'axis': 0,  # x-axis direction
+                'slice_idx': x_res // 2,  # middle slice
                 'coord_names': ('Y', 'Z'),
                 'title': f'{title} X-Slice (X={x_coords[x_res//2]:.2f})',
                 'filename': f'{title}_slice_x.png',
@@ -588,8 +540,8 @@ class Mapping:
             },
             {
                 'name': 'y_slice',
-                'axis': 1,  # y轴方向
-                'slice_idx': y_res // 2,  # 中间切片
+                'axis': 1,  # y-axis direction
+                'slice_idx': y_res // 2,  # middle slice
                 'coord_names': ('X', 'Z'),
                 'title': f'{title} Y-Slice (Y={y_coords[y_res//2]:.2f})',
                 'filename': f'{title}_slice_y.png',
@@ -597,8 +549,8 @@ class Mapping:
             },
             {
                 'name': 'z_slice',
-                'axis': 2,  # z轴方向
-                'slice_idx': z_res // 2,  # 中间切片
+                'axis': 2,  # z-axis direction
+                'slice_idx': z_res // 2,  # middle slice
                 'coord_names': ('X', 'Y'),
                 'title': f'{title} Z-Slice (Z={z_coords[z_res//2]:.2f})',
                 'filename': f'{title}_slice_z.png',
@@ -606,7 +558,7 @@ class Mapping:
             }
         ]
 
-        # 为每个方向生成切片
+        # Generate slices for each direction
         for config in slice_configs:
             axis = config['axis']
             slice_idx = config['slice_idx']
@@ -615,35 +567,35 @@ class Mapping:
             filename = config['filename']
             coord1_vals, coord2_vals = config['coords']
             
-            # 提取切片数据
-            if axis == 0:  # x切片，固定x，变化y,z
+            # Extract slice data
+            if axis == 0:  # x slice, fixed x, varying y,z
                 sdf_slice = u_np[slice_idx, :, :]
-            elif axis == 1:  # y切片，固定y，变化x,z
+            elif axis == 1:  # y slice, fixed y, varying x,z
                 sdf_slice = u_np[:, slice_idx, :]
-            else:  # z切片，固定z，变化x,y
+            else:  # z slice, fixed z, varying x,y
                 sdf_slice = u_np[:, :, slice_idx]
             
-            # 创建坐标网格
+            # Create coordinate grid
             coord1_grid, coord2_grid = np.meshgrid(coord1_vals, coord2_vals, indexing='ij')
             
-            # 绘制图像
+            # Draw image
             plt.figure(figsize=(12, 10))
             
-            # 使用imshow显示SDF切片
+            # Use imshow to display SDF slice
             im = plt.imshow(
-                sdf_slice.T,  # 转置以正确显示方向
+                sdf_slice.T,  # transpose to display direction correctly
                 extent=[coord1_vals[0], coord1_vals[-1], coord2_vals[0], coord2_vals[-1]],
                 origin='lower',
-                cmap='RdBu_r',  # 红色为正值，蓝色为负值
+                cmap='RdBu_r',  # red for positive values, blue for negative values
                 aspect='equal'
             )
             
-            # 添加等高线
+            # Add contour lines
             levels = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
             cs = plt.contour(coord1_grid, coord2_grid, sdf_slice, 
                            levels=levels, colors='black', alpha=0.3, linewidths=0.5)
             
-            # 特别标出零等高线（表面）
+            # Highlight zero contour line (surface)
             zero_contour = plt.contour(coord1_grid, coord2_grid, sdf_slice, 
                                      levels=[0], colors='red', linewidths=2)
             
@@ -653,14 +605,14 @@ class Mapping:
             plt.title(title, fontsize=14)
             plt.grid(True, alpha=0.3)
             
-            # 添加数据范围信息到副标题
+            # Add data range information to subtitle
             plt.suptitle(
                 f'SDF Range: [{sdf_slice.min():.3f}, {sdf_slice.max():.3f}] | '
                 f'Grid: {sdf_slice.shape[0]}×{sdf_slice.shape[1]}',
                 fontsize=10, y=0.95
             )
 
-            # 保存图像
+            # Save image
             save_path = os.path.join(save_dir, filename)
             plt.savefig(save_path, dpi=300, bbox_inches='tight', facecolor='white')
             plt.close()
@@ -668,7 +620,7 @@ class Mapping:
             print(f"SDF {config['name']} saved to: {save_path}")
             print(f"  Slice index: {slice_idx} (axis {axis})")
             print(f"  SDF range: [{sdf_slice.min():.3f}, {sdf_slice.max():.3f}]")
-            print(f"  Grid size: {sdf_slice.shape[0]}×{sdf_slice.shape[1]}")
+            print(f"  Grid size: {sdf_slice.shape[0]}*{sdf_slice.shape[1]}")
         
     
 

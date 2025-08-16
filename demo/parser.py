@@ -4,11 +4,9 @@ import yaml
 
 
 class ArgumentParserX(argparse.ArgumentParser):
-    def __init__(self, vis, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.add_argument("config", type=str)
-        if not vis:
-            self.add_argument("-run_ros", '--run_ros', action='store_true', default=False)
 
     def parse_args(self, args=None, namespace=None):
         _args = self.parse_known_args(args, namespace)[0]
@@ -60,10 +58,11 @@ class ArgumentParserX(argparse.ArgumentParser):
         return dict1
 
 
-def get_parser(vis=False):
-    parser = ArgumentParserX(vis=vis)
+def get_parser():
+    parser = ArgumentParserX()
     parser.add_argument("--resume", default=None, type=str)
     parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--save_mesh", action='store_true')
     return parser
 
 
