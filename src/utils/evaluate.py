@@ -370,9 +370,13 @@ def get_sdf_gradient_metrics(args, gt_mesh, gt_sdf_positive_mask, ckpt_path):
         grad_pred.append(batch_grad.cpu().numpy())
     grad_pred = np.concatenate(grad_pred, axis=0)
     grad_gt = calculate_gt_gradients(points, gt_mesh, h1=args.criteria['h1'])
-    grad_mae_diff = np.abs(grad_pred - grad_gt).mean()
-    grad_mse_diff = ((grad_pred - grad_gt) ** 2).mean()
-    return grad_mae_diff, grad_mse_diff
+    grad_pred_normalized = grad_pred / (np.linalg.norm(grad_pred, axis=1, keepdims=True)+1e-8)
+    grad_gt_normalized = grad_gt / (np.linalg.norm(grad_gt, axis=1, keepdims=True)+1e-8)
+    cosine = np.sum(grad_pred_normalized * grad_gt_normalized, axis=1)
+    cosine = np.clip(cosine, -1, 1)
+    angle = np.arccos(cosine)
+    grad_angle_diff = np.abs(angle).mean()
+    return grad_angle_diff
 
 
 def evaluate(args):
@@ -393,8 +397,8 @@ def evaluate(args):
     chamfer_distance, f1_score = get_distance_metrics(gt_mesh, reconstructed_mesh, threshold=0.05)
     print(f"Chamfer distance: {chamfer_distance}, F1 score: {f1_score}")
 
-    grad_mae_diff, grad_mse_diff = get_sdf_gradient_metrics(args, gt_mesh, gt_sdf_positive_mask, ckpt_path)
-    print(f"SDF gradient MAE diff: {grad_mae_diff}, SDF gradient MSE diff: {grad_mse_diff}")
+    grad_angle_diff = get_sdf_gradient_metrics(args, gt_mesh, gt_sdf_positive_mask, ckpt_path)
+    print(f"SDF gradient angle diff: {grad_angle_diff}")
 
 # Usage examples
 if __name__ == "__main__":
