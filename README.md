@@ -21,6 +21,7 @@ This report focuses on accurately predicting the SDF at any location using a con
 4. Install the dependency packages.
    ```bash
    bash install.sh
+   pip install -r requirements.txt
    ```
 
 5. Install tinycudann and its pytorch extension following https://github.com/NVlabs/tiny-cuda-nn 
@@ -50,8 +51,7 @@ bash scripts/download_replica.sh
 
 ```bash
 # take replica room0 dataset as example
-cd mapping
-python -W ignore demo/run_mapping.py configs/replica/room_0.yaml
+python demo/run_mapping.py configs/replica/room_0.yaml --save-mesh
 ```
 
 The final reconstructed mesh will be saved in `mapping/logs/{DATASET}/{DATA SEQUENCE}/{FILE_NAME}/mesh`.
@@ -67,26 +67,10 @@ The final reconstructed mesh will be saved in `mapping/logs/{DATASET}/{DATA SEQU
 bash scripts/download_replica_mesh.sh
 ```
 
-2. Replace the filename in `eval/eval_recon.py` with the built library
-
-```bash
-torch.classes.load_library("third_party/sparse_octree/build/lib.xxx/svo.xxx.so")
-```
-
-3. Then run the command below. The 2D metric requires rendering of 1000 depth images. Use `-2d` to enable 2D metric. Use `-3d` to enable 3D metric. The reconstruction results will be saved in the `$OUTPUT_FOLDER`
-
 ```bash
 # assign any output_folder and gt mesh you like, here is just an example
-cd mapping
 OUTPUT_FOLDER=logs/replica/room0/FILE_NAME
 GT_MESH=../Datasets/Replica/cull_replica_mesh/room0.ply
-python eval/eval_recon.py \
-$OUTPUT_FOLDER/bak/config.yaml \
---rec_mesh $OUTPUT_FOLDER/mesh/final_mesh.ply \
---gt_mesh $GT_MESH \
---ckpt $OUTPUT_FOLDER/ckpt/final_ckpt.pth \
---out_dir $OUTPUT_FOLDER \
--2d \
--3d
+python src/evaluate.py logs/replica/room0/h2mapping-baseline/bak/config.yaml # --save mesh
 ```
 
