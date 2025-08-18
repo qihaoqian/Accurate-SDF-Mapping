@@ -195,6 +195,67 @@ def get_points(bound, res, offset=0):
     
     return points, (x_res, y_res, z_res)
 
+def rgba_visualize(points, values, alpha=1.0, save_path=None):
+    """
+    向量化版：values 为 ndarray，返回 shape=(N,4) 的 RGBA
+    """
+    v_min, v_max = np.min(values), np.max(values)
+    v = ((values - v_min) / (v_max - v_min)).astype(np.float32)
+    h = v * 5.0 + 1.0
+    i = np.floor(h).astype(np.int32)
+    f = h - i
+    f = np.where((i % 2) == 0, 1.0 - f, f)  # 偶数翻转
+    n = 1.0 - f
+
+    # 分段赋值（与上面标量逻辑一致）
+    r = np.where(i <= 1, n,
+        np.where(i == 2, 0.0,
+        np.where(i == 3, 0.0,
+        np.where(i == 4, n, 1.0))))
+    g = np.where(i <= 1, 0.0,
+        np.where(i == 2, n,
+        np.where(i == 3, 1.0,
+        np.where(i == 4, 1.0, n))))
+    b = np.where(i <= 1, 1.0,
+        np.where(i == 2, 1.0,
+        np.where(i == 3, n, 0.0)))
+
+    a = np.full_like(v, float(alpha))
+
+    rgba = np.stack([r, g, b, a], axis=-1)
+    
+    import open3d as o3d
+    
+    
+    # 展平颜色数组 (只取RGB，忽略alpha通道)
+    colors = rgba.reshape(-1, 4)[:, :3]  # 只要RGB通道
+    points = points.reshape(-1, 3)
+    
+    # 可选：过滤掉值为0的点（如果不想显示空白区域）
+    # non_zero_mask = values_flat > 1e-6
+    # points = points[non_zero_mask]
+    # colors = colors[non_zero_mask]
+    
+    # 创建Open3D点云对象
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors)
+    
+    # 保存点云
+    success = o3d.io.write_point_cloud(save_path, pcd)
+    
+    if success:
+        print(f"点云已保存到: {save_path}")
+        print(f"点云包含 {len(points)} 个点")
+        print(f"坐标范围: X[{points[:, 0].min():.2f}, {points[:, 0].max():.2f}] "
+              f"Y[{points[:, 1].min():.2f}, {points[:, 1].max():.2f}] "
+              f"Z[{points[:, 2].min():.2f}, {points[:, 2].max():.2f}]")
+    else:
+        print(f"保存点云失败: {save_path}")
+    
+    return pcd
+
+
 def get_sdf_loss(args, sdf_u, prior_u, gt_mesh):
     bound = args.decoder_specs['bound']
     offset = args.mapper_specs['offset']
@@ -281,22 +342,34 @@ def sample_points_on_mesh(mesh: trimesh.Trimesh, n_points=200_000):
     pts, _ = trimesh.sample.sample_surface(mesh, n_points)
     return pts.astype(np.float32)
 
-def chamfer_and_f1(pts_a: np.ndarray, pts_b: np.ndarray, threshold: float):
+def mesh_metrics(pts_a: np.ndarray, pts_b: np.ndarray, threshold: float):
     """
     基于点云的 Chamfer 距离和 F1 score
-    threshold: 匹配的最大距离阈值（例如 0.05 表示 5 cm）
+    
+    Args:
+        pts_a: GT 点云，shape (N, 3)
+        pts_b: 预测点云，shape (M, 3)  
+        threshold: 匹配的最大距离阈值（例如 0.05 表示 5 cm）
+        
+    Returns:
+        dict: 包含所有评估指标的字典
     """
-    if pts_a.shape[0] == 0 or pts_b.shape[0] == 0:
-        return np.nan, np.nan
-
-    tree_a = cKDTree(pts_a)
-    tree_b = cKDTree(pts_b)
+    tree_a = cKDTree(pts_a) #gt
+    tree_b = cKDTree(pts_b) #pred
 
     d_b2a, _ = tree_a.query(pts_b, k=1, workers=-1)
     d_a2b, _ = tree_b.query(pts_a, k=1, workers=-1)
+    comp_ratio = np.mean(d_a2b < threshold).astype(np.float32)
+    comp_ratio_std = np.std(d_a2b < threshold).astype(np.float32)
+    comp = np.mean(d_a2b)
+    comp_std = np.std(d_a2b)
+    acc = np.mean(d_b2a)
+    acc_std = np.std(d_b2a)
 
     # Chamfer（非平方版）
     chamfer = float(d_a2b.mean() + d_b2a.mean())
+    rgba_visualize(pts_a, d_a2b, save_path=os.path.join(args.log_dir, args.exp_name, "misc", "d_a2b.ply"))
+    rgba_visualize(pts_b, d_b2a, save_path=os.path.join(args.log_dir, args.exp_name, "misc", "d_b2a.ply"))
 
     # F1 计算
     tp = np.sum(d_b2a <= threshold)      # Predicted points correctly matched to GT
@@ -307,7 +380,21 @@ def chamfer_and_f1(pts_a: np.ndarray, pts_b: np.ndarray, threshold: float):
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
 
-    return chamfer, f1
+    return {
+        'chamfer_distance': float(chamfer),
+        'f1_score': float(f1),
+        'precision': float(precision),
+        'recall': float(recall),
+        'complete_ratio': float(comp_ratio),  # GT点被覆盖的比例
+        'complete_ratio_std': float(comp_ratio_std),
+        'complete': float(comp),  # 平均完整性距离
+        'complete_std': float(comp_std),
+        'accuracy': float(acc),  # 平均准确性距离  
+        'accuracy_std': float(acc_std),
+        'threshold': float(threshold),
+        'num_gt_points': int(pts_a.shape[0]),
+        'num_pred_points': int(pts_b.shape[0])
+    }
 
 def get_distance_metrics(gt_mesh: trimesh.Trimesh, reconstructed_mesh: trimesh.Trimesh,
                          n_samples=200_000, threshold=0.2):
@@ -331,8 +418,8 @@ def get_distance_metrics(gt_mesh: trimesh.Trimesh, reconstructed_mesh: trimesh.T
     pts_rec = sample_points_on_mesh(recon_cropped, n_points=n_samples)
 
     # 4) Calculate metrics
-    chamfer_distance, f1_score = chamfer_and_f1(pts_gt, pts_rec, threshold=threshold)
-    return chamfer_distance, f1_score
+    metrics = mesh_metrics(pts_gt, pts_rec, threshold=threshold)
+    return metrics
 
 def calculate_gt_gradients(points, gt_mesh, h1=0.04):
     grad = np.zeros_like(points, dtype=np.float32) 
@@ -384,18 +471,28 @@ def evaluate(args):
     gt_mesh_path = args.data_specs['data_path']+'_mesh.ply'  # './Datasets/Replica/room0'
     gt_mesh = trimesh.load(gt_mesh_path)
     
-    # Load and extract mesh
-    reconstructed_mesh, sdf_u, prior_u = load_and_extract_mesh(ckpt_path, args, mesh_res=256, output_dir=None)
+    if args.calculate_sdf_loss:
+        # Load and extract mesh
+        reconstructed_mesh, sdf_u, prior_u = load_and_extract_mesh(ckpt_path, args, mesh_res=256, output_dir=None)
 
-    # Calculate SDF loss
-    loss_dict, gt_sdf_positive_mask = get_sdf_loss(args, sdf_u, prior_u, gt_mesh)
-    print("SDF loss:")
-    for key, value in loss_dict.items():
-        print(f"  {key}: {value:.6f}")
+        # Calculate SDF loss
+        loss_dict, gt_sdf_positive_mask = get_sdf_loss(args, sdf_u, prior_u, gt_mesh)
+        print("SDF loss:")
+        for key, value in loss_dict.items():
+            print(f"  {key}: {value:.6f}")
+    else:
+        reconstructed_mesh = trimesh.load(os.path.join(args.log_dir, args.exp_name, "mesh", "final_mesh.ply"))
 
-    # Calculate chamfer distance, hausdorff distance
-    chamfer_distance, f1_score = get_distance_metrics(gt_mesh, reconstructed_mesh, threshold=0.05)
-    print(f"Chamfer distance: {chamfer_distance}, F1 score: {f1_score}")
+    # Calculate mesh metrics
+    mesh_metrics_dict = get_distance_metrics(gt_mesh, reconstructed_mesh, threshold=0.05)
+    # print in cm and percentage
+    print(f"Chamfer distance: {mesh_metrics_dict['chamfer_distance']*100:.2f} cm, F1 score: {mesh_metrics_dict['f1_score']*100:.2f}%")
+    print(f"Precision: {mesh_metrics_dict['precision']*100:.2f}%, Recall: {mesh_metrics_dict['recall']*100:.2f}%")
+    print(f"Complete ratio: {mesh_metrics_dict['complete_ratio']*100:.2f} ± {mesh_metrics_dict['complete_ratio_std']*100:.2f}")
+    print(f"Complete: {mesh_metrics_dict['complete']*100:.2f} ± {mesh_metrics_dict['complete_std']*100:.2f}")
+    print(f"Accuracy: {mesh_metrics_dict['accuracy']*100:.2f} ± {mesh_metrics_dict['accuracy_std']*100:.2f}")
+    print(f"GT points: {mesh_metrics_dict['num_gt_points']}, Pred points: {mesh_metrics_dict['num_pred_points']}")
+
 
     grad_angle_diff = get_sdf_gradient_metrics(args, gt_mesh, gt_sdf_positive_mask, ckpt_path)
     print(f"SDF gradient angle diff: {grad_angle_diff}")

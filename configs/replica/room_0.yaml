@@ -1,6 +1,6 @@
 base_config: configs/replica/replica.yaml
 
-exp_name: replica/room0/test/decoder-MLP-64-1-lr1e-2
+exp_name: replica/room0/test/prior-1.0
 
 data_specs:
   data_path: './Datasets/Replica/room0'
