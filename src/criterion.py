@@ -58,7 +58,7 @@ class Criterion(nn.Module):
                 loss += self.projection_weight * projection_loss
                 loss_dict["projection_loss"] = projection_loss.item()
             if self.grad_dir_weight > 0:
-                grad_dir_loss = self.compute_grad_dir_loss(grad, dir_gt_space, surface_mask)
+                grad_dir_loss = self.compute_grad_dir_loss(grad, dir_gt_space, ray_sample_mask)
                 loss += self.grad_dir_weight * grad_dir_loss
                 loss_dict["grad_dir_loss"] = grad_dir_loss.item()
         loss_dict["total_loss"] = loss.item()
@@ -187,12 +187,12 @@ class Criterion(nn.Module):
         # print(f"projection_loss: {projection_loss.item()}")
         return projection_loss
 
-    def compute_grad_dir_loss(self, grad, dir_gt_space, surface_mask):
+    def compute_grad_dir_loss(self, grad, dir_gt_space, ray_sample_mask):
         """
         Compute grad_dir loss - only computed on non-surface points
         """
         dir_gt_space_normed = dir_gt_space / (dir_gt_space.norm(dim=1, keepdim=True) + 1e-8)
-        grad_space = grad[~surface_mask.squeeze()]
+        grad_space = grad[ray_sample_mask.squeeze()]
         grad_space_normed = grad_space / (grad_space.norm(dim=1, keepdim=True) + 1e-8)
-        grad_dir_loss = (1.0 - (grad_space_normed * dir_gt_space_normed).sum(dim=1)).mean()
+        grad_dir_loss = (1.0 - (grad_space_normed * dir_gt_space_normed.detach()).sum(dim=1)).mean()
         return grad_dir_loss
