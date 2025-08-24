@@ -183,9 +183,9 @@ class Mapping:
         print("******* extracting final mesh *******")
         pose = self.get_updated_poses()
         self.kf_graph = None
-        # Need to rewrite extract_mesh function
-        mesh, u, u_priors, u_hash_features = self.extract_mesh(res=self.mesh_res, map_states=self.map_states)
         self.logger.log_ckpt(self, name="final_ckpt.pth")
+        mesh, u, u_priors, u_hash_features = self.extract_mesh(res=self.mesh_res, map_states=self.map_states)
+        
         pose = np.asarray(pose)
         pose[:, 0:3, 3] -= self.offset
         self.logger.log_numpy_data(pose, "frame_poses")
@@ -202,6 +202,11 @@ class Mapping:
         np.save(os.path.join(save_dir, "sdf_priors.npy"), u_priors.cpu().numpy() if hasattr(u_priors, "cpu") else u_priors)
         np.save(os.path.join(save_dir, "hash_features.npy"), u_hash_features.cpu().numpy() if hasattr(u_hash_features, "cpu") else u_hash_features)
         print(f"SDF voxel grid u saved to: {os.path.join(save_dir, 'sdf_u.npy')}")
+
+        if self.args.evaluate:
+            # 动态导入以避免循环导入问题
+            from evaluate import evaluate
+            evaluate(self.args)
         
         print("******* mapping process died *******")
 
@@ -389,8 +394,6 @@ class Mapping:
         x, y, z = torch.meshgrid(x, y, z, indexing='ij')
         points = torch.stack([x.flatten(), y.flatten(), z.flatten()], dim=-1)
         points = points.cuda()
-        points_voxel_idx = find_voxel_idx(points, map_states)
-
         
         # Process point cloud in batches to avoid GPU memory insufficiency
         batch_size = 100000  # Adjust this value based on GPU memory
@@ -407,7 +410,7 @@ class Mapping:
                 batch_points = points[i:end_idx]
                 
                 # Find voxel indices for current batch
-                batch_voxel_idx = points_voxel_idx[i:end_idx]
+                batch_voxel_idx = find_voxel_idx(batch_points, map_states)
                 
                 # Get features and predict SDF
                 batch_sdf_priors = get_features(batch_points, batch_voxel_idx, map_states, self.voxel_size)

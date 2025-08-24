@@ -64,6 +64,7 @@ def get_parser():
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--save_mesh", action='store_true')
     parser.add_argument("--calculate_sdf_loss", action='store_true')
+    parser.add_argument("--evaluate", action='store_true')
     return parser
 
 
