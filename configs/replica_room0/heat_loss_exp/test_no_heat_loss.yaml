@@ -3,12 +3,14 @@ decoder: parallel_hash_net
 dataset: replica
 update_pose: False
 
+exp_name: logs-k8s/heat_loss_exp/test_no_heat_loss
+
 criteria:
   boundary_loss_weight: 1000
   perturbation_loss_weight: 200
   eikonal_surface_weight: 3
   eikonal_space_weight: 10
-  heat_weight: 10
+  heat_weight: 0
   sign_weight_free: 0
   sign_weight_occ: 0
   projection_weight: 100
@@ -22,6 +24,7 @@ decoder_specs:
   F_entry: 2  # Number of feature dimensions per entry
   log2_T: 19  # each level's hashmap_size =  F_entry * (2**F_entry)
   b: 2.0  # each level's resolution = N_min * (b**Level)
+  bound: [ [ 0,10 ],[ 0,6 ],[ 0,4 ] ]
 
 sample_specs:
   N: 1
@@ -58,5 +61,12 @@ debug_args:
   render_freq: -1
   save_ckpt_freq: -1
   render_res: [ 320, 240 ]
+
+data_specs:
+  data_path: './Datasets/Replica/room0'
+  max_depth: 10
+  use_gt: True
+
+
 
 

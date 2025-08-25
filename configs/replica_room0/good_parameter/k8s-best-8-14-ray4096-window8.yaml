@@ -3,7 +3,7 @@ decoder: parallel_hash_net
 dataset: replica
 update_pose: False
 
-exp_name: k8s-best-8-14-ray4096-window8
+exp_name: for_eval
 
 criteria:
   boundary_loss_weight: 1000
