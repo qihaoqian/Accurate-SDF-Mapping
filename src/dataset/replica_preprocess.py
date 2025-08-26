@@ -111,13 +111,7 @@ def render_images_offscreen(mesh, camera_pose, camera_params,
     scene = renderer.scene
     scene.set_background([0, 0, 0, 1])
 
-    # 材质（双面以免背面剔除）
-    mat = o3d.visualization.rendering.MaterialRecord()
-    mat.shader = "defaultLit"
-    # mat.double_sided = True
-
-    name = "mesh"
-    scene.add_geometry(name, mesh, mat)
+    scene.add_geometry("mesh", mesh)
 
     # --- 投影：用 3x3 K 的签名 ---
     fx = float(camera_params['fx']); fy = float(camera_params['fy'])
