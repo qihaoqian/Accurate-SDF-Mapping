@@ -87,75 +87,6 @@ def render_images(mesh, camera_pose, camera_params, img_width=1200, img_height=6
     
     return depth_array, rgb_array
 
-def render_images_offscreen(mesh, camera_pose, camera_params,
-                            img_width=1200, img_height=680,
-                            z_near=0.05, z_far=10.0):
-    """
-    camera_pose: 4x4, 相机->世界 (camera-to-world) 变换
-    返回:
-      depth: HxW float32，相机坐标系 z（线性、米制；超出裁剪面为0）
-      rgb:   HxW x 3 float32 [0,1]
-    """
-    if not mesh.has_vertex_normals():
-        mesh.compute_vertex_normals()
-
-    renderer = o3d.visualization.rendering.OffscreenRenderer(img_width, img_height)
-    scene = renderer.scene
-    scene.set_background([0, 0, 0, 1])
-
-    # 创建默认材质
-    material = o3d.visualization.rendering.MaterialRecord()
-    scene.add_geometry("mesh", mesh, material)
-
-    # --- 投影：用 3x3 K 的签名 ---
-    fx = float(camera_params['fx']); fy = float(camera_params['fy'])
-    cx = float(camera_params['cx']); cy = float(camera_params['cy'])
-    K = np.array([[fx, 0.0, cx],
-                  [0.0, fy, cy],
-                  [0.0, 0.0, 1.0]], dtype=np.float64)
-    scene.camera.set_projection(K, float(z_near), float(z_far),
-                                float(img_width), float(img_height))
-    # scene.camera.set_projection(K)
-    # --- 位姿：优先 set_model_matrix，其次 look_at ---
-    cam_to_world = camera_pose.astype(np.float32)
-
-    cam = scene.camera
-    if hasattr(cam, "set_model_matrix"):
-        # 直接设置 camera->world（模型矩阵）
-        cam.set_model_matrix(cam_to_world)
-    elif hasattr(cam, "look_at"):
-        # 用 look_at 构造（从 camera_pose 提取 eye、center、up）
-        R = cam_to_world[:3, :3]
-        t = cam_to_world[:3, 3]
-        eye = t
-        # OpenGL 约定相机前向是 -Z，up 是 +Y。用旋转把它们变到世界系。
-        forward_cam = np.array([0.0, 0.0, -1.0], dtype=np.float32)
-        up_cam = np.array([0.0, 1.0, 0.0], dtype=np.float32)
-        forward_world = R @ forward_cam
-        up_world = R @ up_cam
-        center = eye + forward_world  # 视线指向
-        cam.look_at(center, eye, up_world)
-    else:
-        raise RuntimeError(
-            "Open3D Camera 不支持 set_model_matrix 或 look_at。"
-            "请升级 open3d>=0.16/0.17 附带的 rendering 模块。"
-        )
-
-    # --- 渲染 ---
-    img_color = renderer.render_to_image()
-    rgb = np.asarray(img_color, dtype=np.float32) / 255.0
-    if rgb.ndim == 3 and rgb.shape[-1] == 4:
-        rgb = rgb[..., :3]
-
-    try:
-        img_depth = renderer.render_to_depth_image(z_in_view_space=True)
-    except TypeError:
-        img_depth = renderer.render_to_depth_image()
-    depth = np.asarray(img_depth, dtype=np.float32)
-    # 输出depth的最小值和最大值
-    print(f"depth最小值: {depth.min()}, 最大值: {depth.max()}, 均值: {depth.mean()}")
-
-    return depth, rgb
 
 def insert_upward_frames(data_dir, mesh_path, insert_interval=10):
     """
@@ -383,15 +314,106 @@ def reorder_depth_images(data_dir, total_frames):
     
     print(f"深度图像文件重新编号完成，共{len(temp_names)}个文件")
 
+def process_all_replica_scenes(base_dir="./Datasets/Replica", interval=10):
+    """
+    批量处理所有Replica场景
+    Args:
+        base_dir: Replica数据集根目录
+        interval: 插入间隔，每n帧插入一个向上看的frame
+    """
+    # 定义所有场景名称
+    scenes = ['room0', 'room1', 'room2', 'office0', 'office1', 'office2', 'office3', 'office4']
+    
+    # 相机参数文件路径
+    cam_params_path = os.path.join(base_dir, "cam_params.json")
+    
+    # 检查相机参数文件是否存在
+    if not os.path.exists(cam_params_path):
+        print(f"错误: 找不到相机参数文件 {cam_params_path}")
+        return
+    
+    print(f"开始批量处理{len(scenes)}个Replica场景...")
+    print(f"插入间隔: 每{interval}帧插入一个向上看的frame")
+    print(f"数据集目录: {base_dir}")
+    print(f"场景列表: {scenes}")
+    print("="*60)
+    
+    success_count = 0
+    failed_scenes = []
+    
+    for i, scene in enumerate(scenes, 1):
+        print(f"\n[{i}/{len(scenes)}] 正在处理场景: {scene}")
+        print("-" * 40)
+        
+        # 构建场景相关路径
+        data_dir = os.path.join(base_dir, scene)
+        mesh_path = os.path.join(base_dir, f"{scene}_mesh.ply")
+        
+        # 检查必要文件是否存在
+        if not os.path.exists(data_dir):
+            print(f"错误: 数据目录不存在 - {data_dir}")
+            failed_scenes.append(scene)
+            continue
+            
+        if not os.path.exists(mesh_path):
+            print(f"错误: 网格文件不存在 - {mesh_path}")
+            failed_scenes.append(scene)
+            continue
+            
+        traj_path = os.path.join(data_dir, "traj.txt")
+        if not os.path.exists(traj_path):
+            print(f"错误: 轨迹文件不存在 - {traj_path}")
+            failed_scenes.append(scene)
+            continue
+            
+        results_dir = os.path.join(data_dir, "results")
+        if not os.path.exists(results_dir):
+            print(f"错误: results目录不存在 - {results_dir}")
+            failed_scenes.append(scene)
+            continue
+        
+        print(f"数据目录: {data_dir}")
+        print(f"网格文件: {mesh_path}")
+        
+        try:
+            # 处理当前场景
+            insert_upward_frames(
+                data_dir=data_dir,
+                mesh_path=mesh_path,
+                insert_interval=interval
+            )
+            success_count += 1
+            print(f"✓ 场景 {scene} 处理完成")
+        except Exception as e:
+            print(f"✗ 场景 {scene} 处理失败: {str(e)}")
+            failed_scenes.append(scene)
+            continue
+    
+    # 输出总结
+    print("\n" + "="*60)
+    print(f"批量处理完成！")
+    print(f"成功处理: {success_count}/{len(scenes)} 个场景")
+    print(f"失败场景: {failed_scenes}")
+    if success_count == len(scenes):
+        print("🎉 所有场景都处理成功！")
+    elif success_count > 0:
+        print(f"⚠️  部分场景处理成功，请检查失败的场景")
+    else:
+        print("❌ 所有场景都处理失败，请检查配置和文件路径")
+
 if __name__ == "__main__":
     import argparse
     
     # 命令行参数解析
     parser = argparse.ArgumentParser(description='Replica数据集预处理：插入向上看的frames')
+    parser.add_argument('--mode', type=str, choices=['single', 'batch'], default='single',
+                        help='处理模式: single(单个场景) 或 batch(批量处理所有场景)')
     parser.add_argument('--data_dir', type=str, default="./Datasets/Replica/room0", 
-                        help='数据集目录路径')
+                        help='数据集目录路径 (single模式)')
     parser.add_argument('--mesh_path', type=str, default="./Datasets/Replica/room0_mesh.ply", 
-                        help='网格文件路径')
+                        help='网格文件路径 (single模式)')
+    parser.add_argument('--base_dir', type=str, default="./Datasets/Replica",
+                        help='Replica数据集根目录 (batch模式)')
     parser.add_argument('--interval', type=int, default=10, 
                         help='插入间隔，每n帧插入一个向上看的frame (默认: 10)')
     parser.add_argument('--cam_params', type=str, default="./Datasets/Replica/cam_params.json", 
@@ -399,19 +421,30 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
-    # 读取相机参数
-    camera_params = cam_params(args.cam_params)
-    print("相机参数:")
-    for key, value in camera_params.items():
-        print(f"  {key}: {value}")
-    
-    # 插入向上看的frames
-    print(f"\n开始处理Replica数据集，每{args.interval}帧插入一个向上看的frame...")
-    print(f"数据目录: {args.data_dir}")
-    print(f"网格文件: {args.mesh_path}")
-    
-    insert_upward_frames(
-        data_dir=args.data_dir,
-        mesh_path=args.mesh_path,
-        insert_interval=args.interval
-    )
+    if args.mode == 'batch':
+        # 批量处理模式
+        print("=== 批量处理模式 ===")
+        process_all_replica_scenes(
+            base_dir=args.base_dir,
+            interval=args.interval
+        )
+    else:
+        # 单个场景处理模式
+        print("=== 单个场景处理模式 ===")
+        
+        # 读取相机参数
+        camera_params = cam_params(args.cam_params)
+        print("相机参数:")
+        for key, value in camera_params.items():
+            print(f"  {key}: {value}")
+        
+        # 插入向上看的frames
+        print(f"\n开始处理Replica数据集，每{args.interval}帧插入一个向上看的frame...")
+        print(f"数据目录: {args.data_dir}")
+        print(f"网格文件: {args.mesh_path}")
+        
+        insert_upward_frames(
+            data_dir=args.data_dir,
+            mesh_path=args.mesh_path,
+            insert_interval=args.interval
+        )

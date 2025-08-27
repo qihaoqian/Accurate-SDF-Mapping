@@ -533,7 +533,6 @@ def bundle_adjust_frames(
         N_rays=512,
         num_iterations=10,
         bound=None,
-        update_pose=True,
         optim=None,
         scaler=None,
         frame_id=None,
@@ -547,12 +546,7 @@ def bundle_adjust_frames(
     rays_o_all, rays_d_all, rgb_samples_all, depth_samples_all = [], [], [], []
     num_keyframe = len(keyframe_graph)
     for i, frame in enumerate(keyframe_graph):
-        if update_pose:
-            d_pose = frame.get_d_pose().cuda()
-            ref_pose = frame.get_ref_pose().cuda()
-            pose = d_pose @ ref_pose
-        else:
-            pose = frame.get_ref_pose().cuda()
+        pose = frame.get_ref_pose().cuda()
         valid_idx = torch.nonzero(frame.valid_mask.reshape(-1))
         sample_idx = valid_idx[torch.randint(low=0, high=int(valid_idx.shape[0]),
                                              size=(int(num_iterations * (N_rays / num_keyframe)),))][:, 0]
@@ -591,7 +585,7 @@ def bundle_adjust_frames(
     perturbation_xyz = sampled_xyz[perturbation_mask.squeeze(-1)]
     
     with torch.no_grad():
-        batch_size = 10000  # Adjust according to GPU memory
+        batch_size = 20480  # Adjust according to GPU memory
         nearest_distances_list = []
 
         for start in range(0, perturbation_xyz.shape[0], batch_size):
@@ -605,6 +599,11 @@ def bundle_adjust_frames(
             batch_min_dists, _ = torch.min(distances, dim=1)
 
             nearest_distances_list.append(batch_min_dists)
+            
+            # Explicitly release GPU memory for large intermediate tensors
+            del distances, perturb_batch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         # Concatenate back to complete result
         nearest_distances = torch.cat(nearest_distances_list, dim=0)

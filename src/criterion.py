@@ -109,8 +109,8 @@ class Criterion(nn.Module):
             eikonal_loss (tensor): eikonal loss
         """
         grad_norm = torch.norm(grad, dim=-1, keepdim=True)
-        eikonal_loss_surface = (grad_norm[ray_sample_mask.squeeze()] - 1).abs().mean()
-        eikonal_loss_space = (grad_norm[~ray_sample_mask.squeeze()] - 1).abs().mean()
+        eikonal_loss_surface = (grad_norm[~ray_sample_mask.squeeze()] - 1).abs().mean()
+        eikonal_loss_space = (grad_norm[ray_sample_mask.squeeze()] - 1).abs().mean()
         return eikonal_loss_surface, eikonal_loss_space
     
     def compute_heat_loss(self, ray_sample_mask, pred_sdf, grad, heat_lambda=4):

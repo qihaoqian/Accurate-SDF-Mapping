@@ -1,6 +1,6 @@
 base_config: configs/replica/replica.yaml
 
-exp_name: replica/room0/
+exp_name: replica/room0/debug
 
 data_specs:
   data_path: './Datasets/Replica/room0'

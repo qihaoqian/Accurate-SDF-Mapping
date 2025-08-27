@@ -13,8 +13,7 @@ class H2Mapping:
         # mapper
         self.mapper = Mapping(args, self.logger, data_stream=self.data_stream)
         # initialize map with first frame
-        self.update_pose = args.update_pose
         self.firstframe = self.mapper.initfirst_onlymap()
 
     def run(self):
-        self.mapper.run(self.firstframe, update_pose=self.update_pose)
+        self.mapper.run(self.firstframe)

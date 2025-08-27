@@ -28,6 +28,7 @@ class Mapping:
         debug_args = args.debug_args
         data_specs = args.data_specs
         self.sample_specs = args.sample_specs
+        self.h1 = args.criteria["h1"]
         self.writer = SummaryWriter(log_dir=self.logger.misc_dir)
 
         # get data stream
@@ -70,13 +71,13 @@ class Mapping:
         self.insert_method = mapper_specs["insert_method"]
         self.insert_ratio = mapper_specs["insert_ratio"]
         self.num_vertexes = mapper_specs["num_vertexes"]
-
+        
         self.max_distance = data_specs["max_depth"]
 
-        self.render_freq = debug_args["render_freq"]
-        self.render_res = debug_args["render_res"]
-        self.mesh_freq = debug_args["mesh_freq"]
-        self.save_ckpt_freq = debug_args["save_ckpt_freq"]
+        # self.render_freq = debug_args["render_freq"]
+        # self.render_res = debug_args["render_res"]
+        # self.mesh_freq = debug_args["mesh_freq"]
+        # self.save_ckpt_freq = debug_args["save_ckpt_freq"]
 
         self.mesher = MeshExtractor(args)
 
@@ -101,7 +102,7 @@ class Mapping:
         self.frame_poses = []
         self.bound = args.decoder_specs["bound"]
 
-    def mapping_step(self, frame_id, tracked_frame, update_pose, epoch):
+    def mapping_step(self, frame_id, tracked_frame, epoch):
         ######################
         self.idx = tracked_frame.stamp
         self.create_voxels(tracked_frame)
@@ -110,7 +111,7 @@ class Mapping:
         self.vector_features = self.map_states["vector_features"]
         if self.idx == 0:
             self.insert_kf(tracked_frame)
-        self.do_mapping(tracked_frame=tracked_frame, update_pose=update_pose, epoch=epoch)
+        self.do_mapping(tracked_frame=tracked_frame, epoch=epoch)
         # Fixed 50 frames to insert pictures(naive)
         if (tracked_frame.stamp - self.current_kf.stamp) > 50 and self.insert_method == "naive":
             self.insert_kf(tracked_frame)
@@ -121,23 +122,10 @@ class Mapping:
                     or (tracked_frame.stamp - self.current_kf.stamp) > 100:
                 self.insert_kf(tracked_frame)
 
-        self.tracked_pose = tracked_frame.get_ref_pose().detach() @ tracked_frame.get_d_pose().detach()
-        ref_pose = self.current_kf.get_ref_pose().detach() @ self.current_kf.get_d_pose().detach()
-        rel_pose = torch.linalg.inv(ref_pose) @ self.tracked_pose
-        self.frame_poses += [(len(self.kf_graph) - 1, rel_pose.cpu())]
+        # if self.save_ckpt_freq > 0 and (tracked_frame.stamp + 1) % self.save_ckpt_freq == 0:
+        #     self.logger.log_ckpt(self, name=f"{tracked_frame.stamp:06d}.pth")
 
-        if self.mesh_freq > 0 and (tracked_frame.stamp + 1) % self.mesh_freq == 0:
-            self.logger.log_mesh(self.extract_mesh(
-                res=self.mesh_res, clean_mesh=False, map_states=self.map_states),
-                name=f"mesh_{tracked_frame.stamp:06d}.ply")
-
-        if self.save_data_freq > 0 and (tracked_frame.stamp + 1) % self.save_data_freq == 0:
-            self.save_debug_data(tracked_frame)
-
-        if self.save_ckpt_freq > 0 and (tracked_frame.stamp + 1) % self.save_ckpt_freq == 0:
-            self.logger.log_ckpt(self, name=f"{tracked_frame.stamp:06d}.pth")
-
-    def run(self, first_frame, update_pose):
+    def run(self, first_frame):
         self.idx = 0
         self.voxel_initialized = torch.zeros(self.num_vertexes).cuda().bool()
         self.vertex_initialized = torch.zeros(self.num_vertexes).cuda().bool()
@@ -151,12 +139,7 @@ class Mapping:
         self.sdf_priors = self.map_states["sdf_priors"]
         self.vector_features = self.map_states["vector_features"]
         self.insert_kf(first_frame)
-        self.do_mapping(tracked_frame=first_frame, update_pose=update_pose)
-
-        self.tracked_pose = first_frame.get_ref_pose().detach() @ first_frame.get_d_pose().detach()
-        ref_pose = self.current_kf.get_ref_pose().detach() @ self.current_kf.get_d_pose().detach()
-        rel_pose = torch.linalg.inv(ref_pose) @ self.tracked_pose
-        self.frame_poses += [(len(self.kf_graph) - 1, rel_pose.cpu())]
+        self.do_mapping(tracked_frame=first_frame)
 
         print("mapping started!")
 
@@ -167,28 +150,22 @@ class Mapping:
             data_in = self.data_stream[frame_id]
             tracked_frame = RGBDFrame(*data_in[:-1], offset=self.offset, ref_pose=data_in[-1])
 
-            if update_pose is False:
-                tracked_frame.d_pose.requires_grad_(False)
             if tracked_frame.ref_pose.isinf().any():
                 continue
-            self.mapping_step(frame_id, tracked_frame, update_pose, epoch)
+            self.mapping_step(frame_id, tracked_frame, epoch)
             epoch += 1
 
         print("******* mapping process died *******")
         print(f"********** post-processing {self.final_iter} steps **********")
         self.num_iterations = 1
         for iter in range(self.final_iter):
-            self.do_mapping(tracked_frame=None, update_pose=False)
+            self.do_mapping(tracked_frame=None)
 
         print("******* extracting final mesh *******")
-        pose = self.get_updated_poses()
         self.kf_graph = None
         self.logger.log_ckpt(self, name="final_ckpt.pth")
         mesh, u, u_priors, u_hash_features = self.extract_mesh(res=self.mesh_res, map_states=self.map_states)
         
-        pose = np.asarray(pose)
-        pose[:, 0:3, 3] -= self.offset
-        self.logger.log_numpy_data(pose, "frame_poses")
         self.logger.log_numpy_data(self.extract_voxels(map_states=self.map_states), "final_voxels")
         
         # Save SDF slice images for debugging
@@ -197,11 +174,11 @@ class Mapping:
         self.save_sdf_slice(u, save_dir=save_dir, title="SDF")
         self.save_sdf_slice(u_priors, save_dir=save_dir, title="SDF Priors")
         self.save_sdf_slice(u_hash_features, save_dir=save_dir, title="Hash Features")
-        # Save u to file for subsequent analysis
-        np.save(os.path.join(save_dir, "sdf_u.npy"), u.cpu().numpy() if hasattr(u, "cpu") else u)
-        np.save(os.path.join(save_dir, "sdf_priors.npy"), u_priors.cpu().numpy() if hasattr(u_priors, "cpu") else u_priors)
-        np.save(os.path.join(save_dir, "hash_features.npy"), u_hash_features.cpu().numpy() if hasattr(u_hash_features, "cpu") else u_hash_features)
-        print(f"SDF voxel grid u saved to: {os.path.join(save_dir, 'sdf_u.npy')}")
+        # # Save u to file for subsequent analysis
+        # np.save(os.path.join(save_dir, "sdf_u.npy"), u.cpu().numpy() if hasattr(u, "cpu") else u)
+        # np.save(os.path.join(save_dir, "sdf_priors.npy"), u_priors.cpu().numpy() if hasattr(u_priors, "cpu") else u_priors)
+        # np.save(os.path.join(save_dir, "hash_features.npy"), u_hash_features.cpu().numpy() if hasattr(u_hash_features, "cpu") else u_hash_features)
+        # print(f"SDF voxel grid u saved to: {os.path.join(save_dir, 'sdf_u.npy')}")
 
         if self.args.evaluate:
             # 动态导入以避免循环导入问题
@@ -214,14 +191,13 @@ class Mapping:
         init_pose = self.data_stream.get_init_pose(self.start_frame)
         fid, rgb, depth, K, _ = self.data_stream[self.start_frame]
         first_frame = RGBDFrame(fid, rgb, depth, K, offset=self.offset, ref_pose=init_pose)
-        first_frame.d_pose.requires_grad_(False)
 
         print("******* initializing first_frame: %d********" % first_frame.stamp)
         self.last_frame = first_frame
         self.start_frame += 1
         return first_frame
 
-    def do_mapping(self, tracked_frame=None, update_pose=True, epoch=0):
+    def do_mapping(self, tracked_frame=None, epoch=0):
         self.decoder.train()
         optimize_targets = self.select_optimize_targets(tracked_frame)
         bundle_adjust_frames(
@@ -233,12 +209,12 @@ class Mapping:
             self.n_rays,
             self.num_iterations,
             self.bound,
-            update_pose=update_pose,
             optim=self.optim,
             scaler=self.scaler,
             frame_id=tracked_frame.stamp,
             use_adaptive_ending=self.use_adaptive_ending,
             writer=self.writer,
+            h1=self.h1,
             epoch=epoch,
             sample_specs=self.sample_specs
         )
@@ -352,17 +328,6 @@ class Mapping:
         self.map_states = map_states
 
     @torch.no_grad()
-    def get_updated_poses(self):
-        frame_poses = []
-        for i in range(len(self.frame_poses)):
-            ref_frame_ind, rel_pose = self.frame_poses[i]
-            ref_frame = self.kf_graph[ref_frame_ind]
-            ref_pose = ref_frame.get_ref_pose().detach().cpu() @ ref_frame.get_d_pose().detach().cpu()
-            pose = ref_pose @ rel_pose
-            frame_poses += [pose.detach().cpu().numpy()]
-        return frame_poses
-
-    @torch.no_grad()
     def extract_mesh(self, res=256, map_states=None):
         from functions.render_helpers import find_voxel_idx
         from torch.nn import functional as F
@@ -469,39 +434,6 @@ class Mapping:
         voxels = (voxels[:, :3] + voxels[:, -1:] / 2) * \
                  self.voxel_size - self.offset
         return voxels
-
-    @torch.no_grad()
-    def save_debug_data(self, tracked_frame):
-        """
-        save per-frame voxel, mesh and pose
-        """
-        pose = tracked_frame.get_ref_pose().detach().cpu().numpy()
-        pose[:3, 3] -= self.offset
-        frame_poses = self.get_updated_poses()
-        mesh = self.extract_mesh(res=8, clean_mesh=True)
-        voxels = self.extract_voxels(map_states=self.map_states).detach().cpu().numpy()
-        kf_poses = [p.get_ref_pose().detach().cpu().numpy()
-                    for p in self.kf_graph]
-
-        for f in frame_poses:
-            f[:3, 3] -= self.offset
-        for kf in kf_poses:
-            kf[:3, 3] -= self.offset
-
-        verts = np.asarray(mesh.vertices)
-        faces = np.asarray(mesh.triangles)
-        color = np.asarray(mesh.vertex_colors)
-
-        self.logger.log_debug_data({
-            "pose": pose,
-            "updated_poses": frame_poses,
-            "mesh": {"verts": verts, "faces": faces, "color": color},
-            "voxels": voxels,
-            "voxel_size": self.voxel_size,
-            "keyframes": kf_poses,
-            "is_kf": (tracked_frame == self.current_kf)
-        }, tracked_frame.stamp)
-
 
     @torch.no_grad()
     def save_sdf_slice(self, u, save_dir=None, title=None):

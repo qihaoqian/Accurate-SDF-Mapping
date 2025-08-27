@@ -140,44 +140,41 @@ def load_and_extract_mesh(ckpt_path, args, mesh_res=256, output_dir=None):
     print(f"\nStart extracting mesh, resolution: {mesh_res}")
     print("This may take several minutes...")
     
-    try:
-        mesh, sdf_u, prior_u, decoder_u = mapper.extract_mesh(
-            res=mesh_res, 
-            map_states=mapper.map_states
-        )
-        
-        # 5. Save mesh
-        if args.save_mesh:
-            mesh_name = f"reconstructed_mesh_res{mesh_res}.ply"
-            output_path = os.path.join(output_dir, mesh_name)
-            mesh.export(output_path)
-            print(f"🔍 Mesh saved to: {output_path}")
-        else:
-            output_path = None
+    mesh, sdf_u, prior_u, decoder_u = mapper.extract_mesh(
+        res=mesh_res, 
+        map_states=mapper.map_states
+    )
+    
+    # # 5. Save mesh
+    # if args.save_mesh:
+    #     mesh_name = f"reconstructed_mesh_res{mesh_res}.ply"
+    #     output_path = os.path.join(output_dir, mesh_name)
+    #     mesh.export(output_path)
+    #     print(f"🔍 Mesh saved to: {output_path}")
+    # else:
+    #     output_path = None
 
+    
+    # print(f"\n✅ Mesh reconstruction completed!")
+    # print(f"📁 Output path: {output_path}")
+    # print(f"📊 Vertex count: {len(mesh.vertices)}")
+    # print(f"📊 Face count: {len(mesh.faces)}")
+    
+    # 6. Save additional debug information
+    # if args.save_mesh:
+    #     debug_dir = os.path.join(output_dir, "debug")
+    #     if not os.path.exists(debug_dir):
+    #         os.makedirs(debug_dir)
         
-        print(f"\n✅ Mesh reconstruction completed!")
-        print(f"📁 Output path: {output_path}")
-        print(f"📊 Vertex count: {len(mesh.vertices)}")
-        print(f"📊 Face count: {len(mesh.faces)}")
+    #     np.save(os.path.join(debug_dir, f"sdf_u_res{mesh_res}.npy"), sdf_u)
+    #     np.save(os.path.join(debug_dir, f"prior_u_res{mesh_res}.npy"), prior_u)
+    #     np.save(os.path.join(debug_dir, f"decoder_u_res{mesh_res}.npy"), decoder_u)
         
-        # 6. Save additional debug information
-        if args.save_mesh:
-            debug_dir = os.path.join(output_dir, "debug")
-            if not os.path.exists(debug_dir):
-                os.makedirs(debug_dir)
-            
-            np.save(os.path.join(debug_dir, f"sdf_u_res{mesh_res}.npy"), sdf_u)
-            np.save(os.path.join(debug_dir, f"prior_u_res{mesh_res}.npy"), prior_u)
-            np.save(os.path.join(debug_dir, f"decoder_u_res{mesh_res}.npy"), decoder_u)
-            
-            print(f"🔍 Debug data saved to: {debug_dir}")
+    #     print(f"🔍 Debug data saved to: {debug_dir}")
+    
+    return mesh, sdf_u, prior_u
         
-        return mesh, sdf_u, prior_u
-        
-    except Exception as e:
-        print(f"❌ Mesh extraction failed: {str(e)}")
-        raise e
+
     
 
 def get_points(bound, res, offset=0):
@@ -430,7 +427,7 @@ def get_distance_metrics(gt_mesh: trimesh.Trimesh, reconstructed_mesh: trimesh.T
     return metrics
 
 
-def calculate_gt_gradients(points, gt_mesh, h1=0.04):
+def calculate_gt_gradients(points, gt_mesh, h1=0.04, args=None):
     grad = np.zeros_like(points, dtype=np.float32) 
     vertices = gt_mesh.vertices.astype(np.float32) 
     faces = gt_mesh.faces.astype(np.int32)
@@ -459,7 +456,8 @@ def calculate_gt_gradients(points, gt_mesh, h1=0.04):
     points_valid = points[valid_mask]
     
     print(f"Valid gradient points: {valid_mask.sum()} / {len(valid_mask)} ({valid_mask.sum()/len(valid_mask)*100:.2f}%)")
-    np.save(os.path.join(args.log_dir, args.exp_name, "misc", "points_for_grad.npy"), points_valid)
+    if args is not None:
+        np.save(os.path.join(args.log_dir, args.exp_name, "misc", "points_for_grad.npy"), points_valid)
     return grad_valid, valid_mask
 
 def get_sdf_gradient_metrics(args, gt_mesh, points_for_grad, ckpt_path):
@@ -476,11 +474,12 @@ def get_sdf_gradient_metrics(args, gt_mesh, points_for_grad, ckpt_path):
                                                     h1=args.criteria['h1'])
         grad_pred.append(batch_grad.cpu().numpy())
     grad_pred = np.concatenate(grad_pred, axis=0)
-    grad_gt, valid_mask = calculate_gt_gradients(points_for_grad, gt_mesh, h1=args.criteria['h1'])
+    grad_gt, valid_mask = calculate_gt_gradients(points_for_grad, gt_mesh, h1=args.criteria['h1'], args=args)
     grad_pred_normalized = grad_pred / (np.linalg.norm(grad_pred, axis=1, keepdims=True)+1e-8)
     grad_gt_normalized = grad_gt / (np.linalg.norm(grad_gt, axis=1, keepdims=True)+1e-8)
     cosine = np.sum(grad_pred_normalized[valid_mask] * grad_gt_normalized, axis=1)
-    np.save(os.path.join(args.log_dir, args.exp_name, "misc", "grad_gt_normalized.npy"), grad_gt_normalized)
+    if args is not None:
+        np.save(os.path.join(args.log_dir, args.exp_name, "misc", "grad_gt_normalized.npy"), grad_gt_normalized)
     cosine = np.clip(cosine, -1, 1)
     angle = np.arccos(cosine)
     grad_angle_diff = np.abs(angle).mean()

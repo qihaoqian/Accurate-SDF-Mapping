@@ -1,7 +1,6 @@
 import numpy as np
 import torch.nn as nn
 
-from se3pose import OptimizablePose
 from utils.sample_util import *
 
 rays_dir = None
@@ -20,30 +19,27 @@ class RGBDFrame(nn.Module):
         self.depth = depth.cuda()
         self.K = K
 
-        if ref_pose is not None:
-            if len(ref_pose.shape) != 2:
-                ref_pose = ref_pose.reshape(4, 4)
-            if type(ref_pose) != torch.Tensor:  # from gt data
-                self.ref_pose = torch.tensor(ref_pose, requires_grad=False, dtype=torch.float32)
-                self.ref_pose[:3, 3] += offset  # Offset ensures voxel coordinates>0
-            else:  # from tracked data
-                self.ref_pose = ref_pose.clone().requires_grad_(False)
-            self.d_pose = OptimizablePose.from_matrix(torch.eye(4, requires_grad=False, dtype=torch.float32))
-        else:
-            self.ref_pose = None
+        if len(ref_pose.shape) != 2:
+            ref_pose = ref_pose.reshape(4, 4)
+        if type(ref_pose) != torch.Tensor:  # from gt data
+            self.ref_pose = torch.tensor(ref_pose, requires_grad=False, dtype=torch.float32)
+            self.ref_pose[:3, 3] += offset  # Offset ensures voxel coordinates>0
+        else:  # from tracked data
+            self.ref_pose = ref_pose.clone().requires_grad_(False)
+        # self.d_pose = OptimizablePose.from_matrix(torch.eye(4, requires_grad=False, dtype=torch.float32))
         self.precompute()
 
-    def get_d_pose(self):
-        return self.d_pose.matrix()
+    # def get_d_pose(self):
+    #     return self.d_pose.matrix()
 
-    def get_d_translation(self):
-        return self.d_pose.translation()
+    # def get_d_translation(self):
+    #     return self.d_pose.translation()
 
-    def get_d_rotation(self):
-        return self.d_pose.rotation()
+    # def get_d_rotation(self):
+    #     return self.d_pose.rotation()
 
-    def get_d_pose_param(self):
-        return self.d_pose.parameters()
+    # def get_d_pose_param(self):
+    #     return self.d_pose.parameters()
 
     def get_ref_pose(self):
         return self.ref_pose
