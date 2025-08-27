@@ -43,7 +43,7 @@ class Criterion(nn.Module):
             loss_dict["sign_loss_occ"] = sign_loss_occ.item()
         # Compute eikonal loss and heat loss
         if self.eikonal_surface_weight > 0 or self.eikonal_space_weight > 0:
-            eikonal_loss_surface, eikonal_loss_space = self.compute_eikonal_loss(grad, surface_mask)
+            eikonal_loss_surface, eikonal_loss_space = self.compute_eikonal_loss(grad, ray_sample_mask)
             loss += self.eikonal_surface_weight * eikonal_loss_surface + self.eikonal_space_weight * eikonal_loss_space
             loss_dict["eikonal_loss_surface"] = eikonal_loss_surface.item()
             loss_dict["eikonal_loss_space"] = eikonal_loss_space.item()
@@ -97,7 +97,7 @@ class Criterion(nn.Module):
         sign_loss_occ = (torch.tanh(100 * occ_pred) + 1).abs().mean()
         return sign_loss_free, sign_loss_occ
         
-    def compute_eikonal_loss(self, grad, surface_mask):
+    def compute_eikonal_loss(self, grad, ray_sample_mask):
         """
         Compute eikonal loss - gradient magnitude should be close to 1
         
@@ -109,8 +109,8 @@ class Criterion(nn.Module):
             eikonal_loss (tensor): eikonal loss
         """
         grad_norm = torch.norm(grad, dim=-1, keepdim=True)
-        eikonal_loss_surface = (grad_norm[surface_mask.squeeze()] - 1).abs().mean()
-        eikonal_loss_space = (grad_norm[~surface_mask.squeeze()] - 1).abs().mean()
+        eikonal_loss_surface = (grad_norm[ray_sample_mask.squeeze()] - 1).abs().mean()
+        eikonal_loss_space = (grad_norm[~ray_sample_mask.squeeze()] - 1).abs().mean()
         return eikonal_loss_surface, eikonal_loss_space
     
     def compute_heat_loss(self, ray_sample_mask, pred_sdf, grad, heat_lambda=4):
@@ -168,6 +168,11 @@ class Criterion(nn.Module):
                 d2_batch = torch.cdist(X_space_batch, X_surf)
                 nn_idx_batch = d2_batch.argmin(dim=1)
                 nn_indices.append(nn_idx_batch)
+                
+                # Explicitly release GPU memory for large intermediate tensors
+                del d2_batch, X_space_batch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
         # Merge results from all batches
         nn_idx_space = torch.cat(nn_indices, dim=0)
