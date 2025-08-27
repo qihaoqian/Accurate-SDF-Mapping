@@ -25,15 +25,6 @@ def cam_params(data_path):
         params = json.load(f)
     return params['camera']
 
-def create_upward_rotation():
-    """
-    创建向上看的旋转矩阵（y轴反方向）
-    Returns:
-        np.ndarray: 3x3旋转矩阵
-    """
-    # 向上看的旋转：绕x轴旋转-90度
-    rotation = Rotation.from_euler('x', -90, degrees=True)
-    return rotation.as_matrix()
 
 def render_images(mesh, camera_pose, camera_params, img_width=1200, img_height=680):
     """
@@ -85,10 +76,11 @@ def render_images(mesh, camera_pose, camera_params, img_width=1200, img_height=6
     # 使用do_render=True确保渲染完成
     rgb_buffer = vis.capture_screen_float_buffer(do_render=True)
     depth_buffer = vis.capture_depth_float_buffer(do_render=True)
-    
+
     # 转换为numpy数组并执行深拷贝，参考C++中的clone()操作
     rgb_array = np.asarray(rgb_buffer).copy()
     depth_array = np.asarray(depth_buffer).copy()
+    print(f"depth_array.min: {depth_array.min()}, depth_array.max: {depth_array.max()}, depth_array.mean: {depth_array.mean()}")
     
     # 关闭可视化器
     vis.destroy_window()
@@ -111,7 +103,9 @@ def render_images_offscreen(mesh, camera_pose, camera_params,
     scene = renderer.scene
     scene.set_background([0, 0, 0, 1])
 
-    scene.add_geometry("mesh", mesh)
+    # 创建默认材质
+    material = o3d.visualization.rendering.MaterialRecord()
+    scene.add_geometry("mesh", mesh, material)
 
     # --- 投影：用 3x3 K 的签名 ---
     fx = float(camera_params['fx']); fy = float(camera_params['fy'])
@@ -121,7 +115,7 @@ def render_images_offscreen(mesh, camera_pose, camera_params,
                   [0.0, 0.0, 1.0]], dtype=np.float64)
     scene.camera.set_projection(K, float(z_near), float(z_far),
                                 float(img_width), float(img_height))
-
+    # scene.camera.set_projection(K)
     # --- 位姿：优先 set_model_matrix，其次 look_at ---
     cam_to_world = camera_pose.astype(np.float32)
 
@@ -159,7 +153,7 @@ def render_images_offscreen(mesh, camera_pose, camera_params,
         img_depth = renderer.render_to_depth_image()
     depth = np.asarray(img_depth, dtype=np.float32)
     # 输出depth的最小值和最大值
-    print(f"depth最小值: {depth.min()}, 最大值: {depth.max()}")
+    print(f"depth最小值: {depth.min()}, 最大值: {depth.max()}, 均值: {depth.mean()}")
 
     return depth, rgb
 
@@ -183,7 +177,9 @@ def insert_upward_frames(data_dir, mesh_path, insert_interval=10):
     original_poses = np.loadtxt(traj_path)
     
     # 创建向上看的旋转矩阵
-    upward_rotation = create_upward_rotation()
+    upward_rotation = np.array([[1, 0, 0],
+                                [0, 1, 0],
+                                [0, 0, 1]])
     
     # 按顺序处理，每10帧插入一个向上看的frame
     new_poses = []
@@ -234,7 +230,7 @@ def insert_upward_frames(data_dir, mesh_path, insert_interval=10):
             print(f"向上看pose矩阵:\n{upward_pose}")
             
             # 同时生成深度图像和RGB图像
-            depth_image, rgb_image = render_images_offscreen(mesh, upward_pose, camera_params)
+            depth_image, rgb_image = render_images(mesh, upward_pose, camera_params)
             
             # 转换深度值到正确的范围（乘以scale factor）
             depth_image_scaled = (depth_image * camera_params['scale']).astype(np.uint16)
