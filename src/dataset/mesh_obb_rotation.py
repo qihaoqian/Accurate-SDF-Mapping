@@ -4,14 +4,14 @@ import os
 
 # 加载 mesh
 mesh_path_list = [
-    "Datasets/Replica/office0_mesh.ply",
-    # "Datasets/Replica/office1_mesh.ply",
-    # "Datasets/Replica/office2_mesh.ply",
-    # "Datasets/Replica/office3_mesh.ply",
-    # "Datasets/Replica/office4_mesh.ply",
-    # "Datasets/Replica/room0_mesh.ply",
-    # "Datasets/Replica/room1_mesh.ply",
-    # "Datasets/Replica/room2_mesh.ply",
+    # "Datasets/Replica/office0_mesh.ply",
+    "Datasets/Replica/office1_mesh.ply",
+    "Datasets/Replica/office2_mesh.ply",
+    "Datasets/Replica/office3_mesh.ply",
+    "Datasets/Replica/office4_mesh.ply",
+    "Datasets/Replica/room0_mesh.ply",
+    "Datasets/Replica/room1_mesh.ply",
+    "Datasets/Replica/room2_mesh.ply",
 ]
 
 for mesh_path in mesh_path_list:
@@ -55,13 +55,17 @@ for mesh_path in mesh_path_list:
          for mn, mx in zip(bound_min, bound_max)]
     print("bound:", bound)
     
-    # 保存旋转后的mesh为新文件
-    output_path = mesh_path.replace(".ply", "_rotated.ply")
-    success = o3d.io.write_triangle_mesh(output_path, mesh_rotated)
+    # 先将原始mesh重命名为_original
+    original_mesh_path = mesh_path.replace(".ply", "_original.ply")
+    os.rename(mesh_path, original_mesh_path)
+    print(f"原始mesh已重命名为: {original_mesh_path}")
+    
+    # 保存旋转后的mesh为原始文件名
+    success = o3d.io.write_triangle_mesh(mesh_path, mesh_rotated)
     if success:
-        print(f"旋转后的mesh已保存到: {output_path}")
+        print(f"旋转后的mesh已保存到: {mesh_path}")
     else:
-        print(f"保存失败: {output_path}")
+        print(f"保存失败: {mesh_path}")
     
     # 处理相应的相机外参文件
     traj_path = mesh_path.replace("_mesh.ply", "/traj.txt")
@@ -106,15 +110,19 @@ for mesh_path in mesh_path_list:
             
             transformed_poses.append(new_pose)
         
-        # 保存变换后的相机外参
-        output_traj_path = traj_path.replace(".txt", "_rotated.txt")
-        with open(output_traj_path, 'w') as f:
+        # 先将原始traj文件重命名为_original
+        original_traj_path = traj_path.replace(".txt", "_original.txt")
+        os.rename(traj_path, original_traj_path)
+        print(f"原始相机外参已重命名为: {original_traj_path}")
+        
+        # 保存变换后的相机外参为原始文件名
+        with open(traj_path, 'w') as f:
             for pose in transformed_poses:
                 # 将4x4矩阵展平为16个值的一行
                 flattened = pose.flatten()
                 f.write(' '.join(map(str, flattened)) + '\n')
         
-        print(f"变换后的相机外参已保存到: {output_traj_path}")
+        print(f"变换后的相机外参已保存到: {traj_path}")
     else:
         print(f"未找到相机外参文件: {traj_path}")
     
