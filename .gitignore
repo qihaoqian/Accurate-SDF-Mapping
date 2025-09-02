@@ -1,3 +1,5 @@
+Pipfile.lock
+
 __pycache__
 *.egg-info
 build/
@@ -97,4 +99,3 @@ CATKIN_IGNORE
 logs
 nautilus/
 # mapping/configs/replica_room0
-

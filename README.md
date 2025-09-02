@@ -11,7 +11,7 @@ This report focuses on accurately predicting the SDF at any location using a con
    git clone --recursive https://github.com/qihaoqian/Accurate-SDF-Mapping.git
    ```
 
-2. Create an anaconda environment called `AccurateSDF`. 
+2. Create an anaconda environment called `AccurateSDF`.
    ```bash
    conda create -n AccurateSDF python=3.10
    ```
@@ -24,11 +24,11 @@ This report focuses on accurately predicting the SDF at any location using a con
    pip install -r requirements.txt
    ```
 
-5. Install tinycudann and its pytorch extension following https://github.com/NVlabs/tiny-cuda-nn 
+5. Install tinycudann and its pytorch extension following https://github.com/NVlabs/tiny-cuda-nn
    ```bash
    cd third_party/tinycudann
-   cmake . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
-   cmake --build build --config RelWithDebInfo -j
+   cmake . -B build -DCMAKE_BUILD_TYPE=Release
+   cmake --build build --config Release -j`nproc`
    cd bindings/torch
    python setup.py install
    ```
@@ -61,7 +61,7 @@ The final reconstructed mesh will be saved in `mapping/logs/{DATASET}/{DATA SEQU
 
 ### Reconstruction Error
 
-1. Download the ground truth Replica meshes 
+1. Download the ground truth Replica meshes
 
 ```bash
 bash scripts/download_replica_mesh.sh
@@ -73,4 +73,3 @@ OUTPUT_FOLDER=logs/replica/room0/FILE_NAME
 GT_MESH=../Datasets/Replica/cull_replica_mesh/room0.ply
 python src/evaluate.py logs/replica/room0/h2mapping-baseline/bak/config.yaml # --save mesh
 ```
-
