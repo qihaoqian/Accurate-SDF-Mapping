@@ -8,7 +8,7 @@ criteria:
   perturbation_loss_weight: 200
   eikonal_surface_weight: 3
   eikonal_space_weight: 10
-  heat_weight: 10
+  heat_weight: 0
   sign_weight_free: 0
   sign_weight_occ: 0
   projection_weight: 100

@@ -122,16 +122,17 @@ def extra_interp(sampled_xyz, point_xyz, point_feats, point_vector_features, vox
 
 
 @torch.enable_grad()  
-def combined_interpolation(sampled_xyz, point_xyz, point_feats, point_vector_features, voxel_size, point_voxel_size):
+def combined_interpolation(sampled_xyz, point_xyz, point_feats, point_vector_features, voxel_size: float, point_voxel_size):
     """
     Combined interpolation method that integrates extra_interp and linear_interp_3d
     
     Args:
-        p: normalized sampling point position (N_points, 1, 3)
-        q: offset coordinates of 8 vertices of voxel (1, 8, 3)
-        point_feats: features of 8 vertices (N_points, 8*embed_dim)
-        point_vector_features: direction features of 8 vertices (N_points, 8, 3)
-    
+        sampled_xyz: tensor of sample points (N, 3)
+        point_xyz: tensor of voxel centers (N, 3)
+        point_feats: vertex features of each voxel (N, 8)
+        point_vector_features: direction features of each voxel (N, 8, 3)
+        voxel_size: physical size of voxel
+        point_voxel_size: grid size of voxels (n, 1)
     Returns:
         final_result: final interpolation result (N_points, embed_dim)
     """
@@ -188,7 +189,7 @@ def get_features(sampled_xyz, sampled_idx, map_states, voxel_size):
     Args:
         samples (dict): sampling points information.
         map_states (dict): voxel information according to the octrees.
-        voxel_size (int): voxel size.
+        voxel_size (float): voxel size.
     
     Returns:
         inputs (dict): sampled distance(N_points) and embedding feature vectors(N_points,emb_dim).
@@ -493,6 +494,9 @@ def finite_diff_grad_combined_safe(X, map_states, voxel_size, sdf_network, h1=1e
             all_offsets.append(X + offset)
     
     # Check if all perturbations are within voxels
+    torch.cuda.synchronize()
+    import time
+    t0 = time.time()
     voxel_idx_list = []
     for offset_points in all_offsets:
         # Use optimized version of voxel index lookup
@@ -501,6 +505,12 @@ def finite_diff_grad_combined_safe(X, map_states, voxel_size, sdf_network, h1=1e
     
     # Only when voxel_idx of perturbations in all 6 directions are not -1, can the point compute gradient
     voxel_idx_stack = torch.stack(voxel_idx_list, dim=0)  # [6, N_points]
+    torch.cuda.synchronize()
+
+    t1 = time.time()
+    dt = t1 - t0
+    dt_per_point = dt / X.shape[0]
+    print(f"Finished in {dt} seconds, {dt_per_point * 1e6} us per point")
     
     
     # Initialize gradient tensor

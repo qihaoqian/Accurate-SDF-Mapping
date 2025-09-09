@@ -31,6 +31,9 @@ This report focuses on accurately predicting the SDF at any location using a con
    cmake --build build --config Release -j`nproc`
    cd bindings/torch
    python setup.py install
+   cd ../../../..
+   cd third_party/sparse_octree
+   python setup.py install
    ```
 
 ## Run in dataset

@@ -166,11 +166,11 @@ class Octree : public torch::CustomClassHolder
 
             // temporal solution
             double voxel_size_;
-            std::vector<torch::Tensor> all_pts;
+//            std::vector<torch::Tensor> all_pts;
 
         private:
-            std::set<uint64_t> all_keys;
-            std::map<uint64_t, int> node_keys;
+//            std::set<uint64_t> all_keys;
+//            std::map<uint64_t, int> node_keys;
             std::map<uint64_t, int> feature_keys;
 
             // std::shared_ptr<Octant> root_;

@@ -136,8 +136,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor ,torch::Tensor, torch::Te
     int frame_voxel_idx[points.size(0)][1];
     for (int i = 0; i < points.size(0); ++i)
     {
-        std::vector<int> features;
-        std::vector<int> features_id;
+//        std::vector<int> features;
+//        std::vector<int> features_id;
 
         int x = points[i][0];
         int y = points[i][1];
