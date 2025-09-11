@@ -25,6 +25,7 @@ from src.utils.import_util import get_dataset, get_decoder
 from src.frame import RGBDFrame
 from src.loggers import BasicLogger
 from src.mapping import Mapping
+from src.functions.render_helpers import find_voxel_idx, get_features
 
 torch.set_grad_enabled(False)
 
@@ -173,9 +174,23 @@ def load_and_extract_mesh(ckpt_path, args, mesh_res=256, output_dir=None):
     #     print(f"🔍 Debug data saved to: {debug_dir}")
     
     return mesh, sdf_u, prior_u
-        
 
-    
+
+def inference(mapper, decoder, points, batch_size=100000):
+    points = points.cuda()
+    sdf_pred = []
+    for i in range(0, points.shape[0], batch_size):
+        batch_points = points[i:i+batch_size]
+        batch_points_voxel_idx = find_voxel_idx(batch_points, mapper.map_states)
+        batch_sdf_priors = get_features(batch_points, batch_points_voxel_idx, mapper.map_states, mapper.voxel_size)
+        batch_hash_features = decoder(batch_points)
+        sdf_priors_features = batch_sdf_priors['sdf_priors'].squeeze(1)
+        batch_sdf_pred = sdf_priors_features + batch_hash_features['sdf']
+        sdf_pred.append(batch_sdf_pred.cpu().numpy())
+        del batch_sdf_priors, batch_hash_features, batch_sdf_pred
+        torch.cuda.empty_cache()
+    sdf_pred = np.concatenate(sdf_pred, axis=0)
+    return sdf_pred
 
 def get_points(bound, res, offset=0):
     # Convert bound to numpy array and apply offset
@@ -256,6 +271,14 @@ def rgba_visualize(points, values, alpha=1.0, save_path=None):
     return pcd
 
 
+def calculate_gt_sdf(gt_mesh, points):
+    vertices = gt_mesh.vertices.astype(np.float32)
+    faces = gt_mesh.faces.astype(np.int32)
+    f = pysdf.SDF(vertices, faces)
+    gt_sdf_values = f(points)
+    return gt_sdf_values
+
+
 def get_sdf_loss(args, sdf_u, prior_u, gt_mesh):
     bound = args.decoder_specs['bound']
     offset = args.mapper_specs['offset']
@@ -263,10 +286,7 @@ def get_sdf_loss(args, sdf_u, prior_u, gt_mesh):
     
     points, (x_res, y_res, z_res) = get_points(bound, res, offset)
     
-    vertices = gt_mesh.vertices.astype(np.float32)
-    faces = gt_mesh.faces.astype(np.int32)
-    f = pysdf.SDF(vertices, faces)
-    gt_sdf_values = f(points)
+    gt_sdf_values = calculate_gt_sdf(gt_mesh, points)
     gt_sdf_values = gt_sdf_values.reshape(x_res, y_res, z_res)
     points = points.reshape(x_res, y_res, z_res, 3)
     # clear invalid values
@@ -275,40 +295,56 @@ def get_sdf_loss(args, sdf_u, prior_u, gt_mesh):
     valid_mask = ~outliers_mask
 
     # near surface points
-    near_surface_mask = (gt_sdf_values >= -1e-3) & (gt_sdf_values < 0.1) & valid_mask
+    near_surface_mask = (gt_sdf_values >= -0.1) & (gt_sdf_values < 0.1) & valid_mask
     num_true = np.count_nonzero(near_surface_mask)
     total = near_surface_mask.size
     print(f"Number of near surface points: {num_true} / {total} ({num_true / total * 100:.2f}%)")
     points_near_surface = points[near_surface_mask]
-    np.save(os.path.join(args.log_dir, args.exp_name, "misc", "points_near_surface.npy"), points_near_surface)
+    np.save(os.path.join(args.data_specs['data_path'], "sdf_info", "points_near_surface.npy"), points_near_surface)
+    np.save(os.path.join(args.data_specs['data_path'], "sdf_info", "gt_sdf_values_near_surface.npy"), gt_sdf_values[near_surface_mask])
+
+    # far surface points
+    far_surface_mask = (gt_sdf_values >= 0.1) & valid_mask
+    num_true = np.count_nonzero(far_surface_mask)
+    total = far_surface_mask.size
+    print(f"Number of far surface points: {num_true} / {total} ({num_true / total * 100:.2f}%)")
+    points_far_surface = points[far_surface_mask]
+    np.save(os.path.join(args.data_specs['data_path'], "sdf_info", "points_far_surface.npy"), points_far_surface)
+    np.save(os.path.join(args.data_specs['data_path'], "sdf_info", "gt_sdf_values_far_surface.npy"), gt_sdf_values[far_surface_mask])
 
     # points for sdf and sdf grad
-    gt_sdf_positive_mask = (gt_sdf_values >= -1e-3) & valid_mask
-    sdf_grad_mask = (gt_sdf_values > 0.03) & valid_mask
-    points_sdf_grad = points[sdf_grad_mask]
-    points_sdf = points[gt_sdf_positive_mask]
-    np.save(os.path.join(args.log_dir, args.exp_name, "misc", "points_sdf.npy"), points_sdf)
-    np.save(os.path.join(args.log_dir, args.exp_name, "misc", "gt_sdf_values_positive.npy"), gt_sdf_values[gt_sdf_positive_mask])
+    points_for_eval_mask = (gt_sdf_values >= -0.1) & valid_mask
+    points_for_eval = points[points_for_eval_mask]
+    num_true = np.count_nonzero(points_for_eval_mask)
+    total = points_for_eval_mask.size
+    print(f"Number of points for eval: {num_true} / {total} ({num_true / total * 100:.2f}%)")
+    np.save(os.path.join(args.data_specs['data_path'], "sdf_info", "points_for_eval.npy"), points_for_eval)
+    np.save(os.path.join(args.data_specs['data_path'], "sdf_info", "gt_sdf_values_for_eval.npy"), gt_sdf_values[points_for_eval_mask])
     # Convert to PyTorch tensors
     import torch
     
     sdf_u_tensor = torch.from_numpy(sdf_u).float()
     prior_u_tensor = torch.from_numpy(prior_u).float()
     gt_sdf_values_tensor = torch.from_numpy(gt_sdf_values).float()
-    gt_sdf_positive_mask_tensor = torch.from_numpy(gt_sdf_positive_mask).bool()
+    points_for_eval_mask_tensor = torch.from_numpy(points_for_eval_mask).bool()
     near_surface_mask_tensor = torch.from_numpy(near_surface_mask).bool()
+    far_surface_mask_tensor = torch.from_numpy(far_surface_mask).bool()
     
     # Calculate MAE (Mean Absolute Error)
-    sdf_mae = torch.mean(torch.abs(sdf_u_tensor[gt_sdf_positive_mask_tensor] - gt_sdf_values_tensor[gt_sdf_positive_mask_tensor]))
-    prior_sdf_mae = torch.mean(torch.abs(prior_u_tensor[gt_sdf_positive_mask_tensor] - gt_sdf_values_tensor[gt_sdf_positive_mask_tensor]))
+    sdf_mae = torch.mean(torch.abs(sdf_u_tensor[points_for_eval_mask_tensor] - gt_sdf_values_tensor[points_for_eval_mask_tensor]))
+    prior_sdf_mae = torch.mean(torch.abs(prior_u_tensor[points_for_eval_mask_tensor] - gt_sdf_values_tensor[points_for_eval_mask_tensor]))
     near_surface_sdf_mae = torch.mean(torch.abs(sdf_u_tensor[near_surface_mask_tensor] - gt_sdf_values_tensor[near_surface_mask_tensor]))
     near_surface_prior_sdf_mae = torch.mean(torch.abs(prior_u_tensor[near_surface_mask_tensor] - gt_sdf_values_tensor[near_surface_mask_tensor]))
+    far_surface_sdf_mae = torch.mean(torch.abs(sdf_u_tensor[far_surface_mask_tensor] - gt_sdf_values_tensor[far_surface_mask_tensor]))
+    far_surface_prior_sdf_mae = torch.mean(torch.abs(prior_u_tensor[far_surface_mask_tensor] - gt_sdf_values_tensor[far_surface_mask_tensor]))
     
     # Calculate MSE (Mean Squared Error)
-    sdf_mse = torch.mean((sdf_u_tensor[gt_sdf_positive_mask_tensor] - gt_sdf_values_tensor[gt_sdf_positive_mask_tensor]) ** 2)
-    prior_sdf_mse = torch.mean((prior_u_tensor[gt_sdf_positive_mask_tensor] - gt_sdf_values_tensor[gt_sdf_positive_mask_tensor]) ** 2)
+    sdf_mse = torch.mean((sdf_u_tensor[points_for_eval_mask_tensor] - gt_sdf_values_tensor[points_for_eval_mask_tensor]) ** 2)
+    prior_sdf_mse = torch.mean((prior_u_tensor[points_for_eval_mask_tensor] - gt_sdf_values_tensor[points_for_eval_mask_tensor]) ** 2)
     near_surface_sdf_mse = torch.mean((sdf_u_tensor[near_surface_mask_tensor] - gt_sdf_values_tensor[near_surface_mask_tensor]) ** 2)
     near_surface_prior_sdf_mse = torch.mean((prior_u_tensor[near_surface_mask_tensor] - gt_sdf_values_tensor[near_surface_mask_tensor]) ** 2)
+    far_surface_sdf_mse = torch.mean((sdf_u_tensor[far_surface_mask_tensor] - gt_sdf_values_tensor[far_surface_mask_tensor]) ** 2)
+    far_surface_prior_sdf_mse = torch.mean((prior_u_tensor[far_surface_mask_tensor] - gt_sdf_values_tensor[far_surface_mask_tensor]) ** 2)
     
 
     # Create dictionary containing MAE and MSE metrics
@@ -317,13 +353,17 @@ def get_sdf_loss(args, sdf_u, prior_u, gt_mesh):
         'prior_sdf_mae': prior_sdf_mae.item(),
         'near_surface_sdf_mae': near_surface_sdf_mae.item(),
         'near_surface_prior_sdf_mae': near_surface_prior_sdf_mae.item(),
+        'far_surface_sdf_mae': far_surface_sdf_mae.item(),
+        'far_surface_prior_sdf_mae': far_surface_prior_sdf_mae.item(),
         'sdf_mse': sdf_mse.item(),
         'prior_sdf_mse': prior_sdf_mse.item(),
         'near_surface_sdf_mse': near_surface_sdf_mse.item(),
-        'near_surface_prior_sdf_mse': near_surface_prior_sdf_mse.item()
+        'near_surface_prior_sdf_mse': near_surface_prior_sdf_mse.item(),
+        'far_surface_sdf_mse': far_surface_sdf_mse.item(),
+        'far_surface_prior_sdf_mse': far_surface_prior_sdf_mse.item()
     }
 
-    return loss_dict, points_sdf_grad
+    return loss_dict, points_for_eval, points_near_surface, points_far_surface
 
 
 def crop_mesh_to_aabb(mesh: trimesh.Trimesh, aabb_min, aabb_max):
@@ -427,15 +467,15 @@ def get_distance_metrics(gt_mesh: trimesh.Trimesh, reconstructed_mesh: trimesh.T
     return metrics
 
 
-def calculate_gt_gradients(points, gt_mesh, h1=0.04, args=None):
+def calculate_gt_gradients(points, gt_mesh, h1, args=None, save_path=None):
     grad = np.zeros_like(points, dtype=np.float32) 
     vertices = gt_mesh.vertices.astype(np.float32) 
     faces = gt_mesh.faces.astype(np.int32)
     f = pysdf.SDF(vertices, faces)
     
-    # 创建一个掩码来跟踪每个点在每个方向上是否有效
     valid_mask = np.ones(points.shape[0], dtype=bool)
     
+    # 首先计算所有方向的梯度
     for i in range(3):
         offset = np.zeros_like(points, dtype=np.float32)
         offset[:, i] = h1
@@ -448,68 +488,79 @@ def calculate_gt_gradients(points, gt_mesh, h1=0.04, args=None):
         # 更新总的有效性掩码（所有方向都必须有效）
         valid_mask = valid_mask & direction_valid
         
-        # 只对有效的点计算梯度
-        grad[direction_valid, i] = (a[direction_valid] - b[direction_valid]) / (2*h1)
+        # 计算所有点的梯度（暂时忽略有效性）
+        grad[:, i] = (a - b) / (2*h1)
     
-    # 只返回所有方向都有效的点的梯度
-    grad_valid = grad[valid_mask]
-    points_valid = points[valid_mask]
+    # 对于任何方向invalid的点，将所有三个方向的梯度都设为0
+    grad[~valid_mask] = 0.0
     
     print(f"Valid gradient points: {valid_mask.sum()} / {len(valid_mask)} ({valid_mask.sum()/len(valid_mask)*100:.2f}%)")
-    if args is not None:
-        np.save(os.path.join(args.log_dir, args.exp_name, "misc", "points_for_grad.npy"), points_valid)
-    return grad_valid, valid_mask
+    if save_path is not None:
+        np.save(save_path, grad)
+    return grad, valid_mask
 
-def get_sdf_gradient_metrics(args, gt_mesh, points_for_grad, ckpt_path):
 
+def get_sdf_gradient_metrics(args, gt_mesh, points_for_grad, ckpt_path, save_name=None):
     mapper, decoder = load_checkpoint(ckpt_path, args)
-    from src.functions.render_helpers import finite_diff_grad_combined_safe
-    batch_size = 50000
+    # 使用torch.autograd求sdf_pred关于points_for_grad的梯度
+    points_torch = torch.tensor(points_for_grad, dtype=torch.float32, device='cuda', requires_grad=True)
+    # 重新推理，确保梯度可用
+    batch_size = 100000
     grad_pred = []
-    for i in range(0, points_for_grad.shape[0], batch_size):
-        batch_points = points_for_grad[i:i+batch_size]
-        batch_points= batch_points + args.mapper_specs['offset']
-        batch_grad = finite_diff_grad_combined_safe(torch.from_numpy(batch_points).cuda(), 
-                                                    mapper.map_states, mapper.voxel_size, mapper.decoder, 
-                                                    h1=args.criteria['h1'])
-        grad_pred.append(batch_grad.cpu().numpy())
+    for i in range(0, points_torch.shape[0], batch_size):
+        batch_points = points_torch[i:i+batch_size]
+        batch_points.requires_grad_(True)
+        batch_points_voxel_idx = find_voxel_idx(batch_points, mapper.map_states)
+        batch_sdf_priors = get_features(batch_points, batch_points_voxel_idx, mapper.map_states, mapper.voxel_size)
+        batch_hash_features = decoder(batch_points)
+        sdf_priors_features = batch_sdf_priors['sdf_priors'].squeeze(1)
+        batch_sdf_pred = sdf_priors_features + batch_hash_features['sdf']
+        grad_outputs = torch.ones_like(batch_sdf_pred)
+        batch_grad = torch.autograd.grad(
+            outputs=batch_sdf_pred,
+            inputs=batch_points,
+            grad_outputs=grad_outputs,
+            create_graph=False,
+            retain_graph=False,
+            only_inputs=True
+        )[0]
+        grad_pred.append(batch_grad.detach().cpu().numpy())
+        del batch_points_voxel_idx, batch_sdf_priors, batch_hash_features, batch_sdf_pred, batch_grad
+        torch.cuda.empty_cache()
     grad_pred = np.concatenate(grad_pred, axis=0)
-    grad_gt, valid_mask = calculate_gt_gradients(points_for_grad, gt_mesh, h1=args.criteria['h1'], args=args)
+    gt_grad_save_path = os.path.join(args.data_specs['data_path'], "sdf_info", f"grad_gt_{save_name}.npy")
+    grad_gt, valid_mask = calculate_gt_gradients(points_for_grad, gt_mesh, h1=0.01, args=args, save_path=gt_grad_save_path)
     grad_pred_normalized = grad_pred / (np.linalg.norm(grad_pred, axis=1, keepdims=True)+1e-8)
     grad_gt_normalized = grad_gt / (np.linalg.norm(grad_gt, axis=1, keepdims=True)+1e-8)
     cosine = np.sum(grad_pred_normalized[valid_mask] * grad_gt_normalized, axis=1)
-    if args is not None:
-        np.save(os.path.join(args.log_dir, args.exp_name, "misc", "grad_gt_normalized.npy"), grad_gt_normalized)
     cosine = np.clip(cosine, -1, 1)
     angle = np.arccos(cosine)
     grad_angle_diff = np.abs(angle).mean()
     return grad_angle_diff
 
 
-def get_cam_position(gt_mesh):
-    to_origin, extents = trimesh.bounds.oriented_bounds(gt_mesh)
-    extents[2] *= 0.7
-    extents[1] *= 0.7
-    extents[0] *= 0.3
-    transform = np.linalg.inv(to_origin)
-    transform[2, 3] += 0.4
-    return extents, transform
-
-
-def normalize(x):
-    return x / np.linalg.norm(x)
-
-
-def viewmatrix(z, up, pos):
-    vec2 = normalize(z)
-    vec1_avg = up
-    vec0 = normalize(np.cross(vec1_avg, vec2))
-    vec1 = normalize(np.cross(vec2, vec0))
-    m = np.stack([vec0, vec1, vec2, pos], 1)
-    return m
-
-
 def calculate_depth_L1(gt_mesh, rec_mesh, n_imgs=1000):
+    def get_cam_position(gt_mesh):
+        to_origin, extents = trimesh.bounds.oriented_bounds(gt_mesh)
+        extents[2] *= 0.7
+        extents[1] *= 0.7
+        extents[0] *= 0.3
+        transform = np.linalg.inv(to_origin)
+        transform[2, 3] += 0.4
+        return extents, transform
+
+
+    def normalize(x):
+        return x / np.linalg.norm(x)
+
+
+    def viewmatrix(z, up, pos):
+        vec2 = normalize(z)
+        vec1_avg = up
+        vec0 = normalize(np.cross(vec1_avg, vec2))
+        vec1 = normalize(np.cross(vec2, vec0))
+        m = np.stack([vec0, vec1, vec2, pos], 1)
+        return m
     H = 500
     W = 500
     focal = 300
@@ -592,17 +643,21 @@ def evaluate(args):
         reconstructed_mesh, sdf_u, prior_u = load_and_extract_mesh(ckpt_path, args, mesh_res=256, output_dir=None)
 
         # Calculate SDF loss
-        loss_dict, points_for_grad = get_sdf_loss(args, sdf_u, prior_u, gt_mesh)
+        loss_dict, points_for_eval, points_near_surface, points_far_surface = get_sdf_loss(args, sdf_u, prior_u, gt_mesh)
         print("SDF loss:")
         for key, value in loss_dict.items():
             print(f"  {key}: {value:.6f}")
             all_metrics[key] = value
 
-        grad_angle_diff = get_sdf_gradient_metrics(args, gt_mesh, points_for_grad, ckpt_path)
+        grad_angle_diff = get_sdf_gradient_metrics(args, gt_mesh, points_for_eval, ckpt_path, save_name="all")
+        grad_angle_diff_near_surface = get_sdf_gradient_metrics(args, gt_mesh, points_near_surface, ckpt_path, save_name="near_surface")
+        grad_angle_diff_far_surface = get_sdf_gradient_metrics(args, gt_mesh, points_far_surface, ckpt_path, save_name="far_surface")
         print(f"SDF gradient angle diff: {grad_angle_diff}")
         all_metrics['sdf_gradient_angle_diff'] = grad_angle_diff
+        all_metrics['sdf_gradient_angle_diff_near_surface'] = grad_angle_diff_near_surface
+        all_metrics['sdf_gradient_angle_diff_far_surface'] = grad_angle_diff_far_surface
     else:
-        reconstructed_mesh = trimesh.load(os.path.join(args.log_dir, args.exp_name, "mesh", "mesh_256.obj"))
+        reconstructed_mesh = trimesh.load(os.path.join(args.log_dir, args.exp_name, "mesh", "mesh_80.obj"))
 
     # Calculate mesh metrics
     mesh_metrics_dict = get_distance_metrics(gt_mesh, reconstructed_mesh, threshold=0.05, args=args)
