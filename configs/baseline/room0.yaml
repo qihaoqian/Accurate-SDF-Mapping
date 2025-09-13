@@ -2,7 +2,7 @@ log_dir: './logs'
 decoder: parallel_hash_net
 dataset: replica
 
-exp_name: replica/room0/baseline
+exp_name: replica/room0/baseline_test
 
 criteria:
   boundary_loss_weight: 1000

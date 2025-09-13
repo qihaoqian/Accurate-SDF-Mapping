@@ -630,15 +630,15 @@ def bundle_adjust_frames(
         
         # Separate mixed precision training: gradient computation outside autocast
         # First perform normal forward pass within autocast
-        with torch.cuda.amp.autocast():
-            for i in range(0, num_points, chunk_size):
-                chunk_samples = {name: s[i:i + chunk_size]
-                                 for name, s in samples.items()}
-                chunk_inputs = get_features(chunk_samples['sampled_point_xyz'],chunk_samples['sampled_point_voxel_idx'], map_states, voxel_size)
-                chunk_outputs = sdf_network(chunk_samples['sampled_point_xyz'])
-                chunk_outputs['sdf'] = chunk_outputs['sdf'] + chunk_inputs['sdf_priors'][:, -1]
-                # print(f"chunk_outputs['sdf']: {chunk_outputs['sdf'].mean().item()}, {chunk_outputs['sdf'].min().item()}, {chunk_outputs['sdf'].max().item()}")
-                field_outputs.append(chunk_outputs)
+        # with torch.cuda.amp.autocast():
+        for i in range(0, num_points, chunk_size):
+            chunk_samples = {name: s[i:i + chunk_size]
+                                for name, s in samples.items()}
+            chunk_inputs = get_features(chunk_samples['sampled_point_xyz'],chunk_samples['sampled_point_voxel_idx'], map_states, voxel_size)
+            chunk_outputs = sdf_network(chunk_samples['sampled_point_xyz'])
+            chunk_outputs['sdf'] = chunk_outputs['sdf'] + chunk_inputs['sdf_priors'][:, -1]
+            # print(f"chunk_outputs['sdf']: {chunk_outputs['sdf'].mean().item()}, {chunk_outputs['sdf'].min().item()}, {chunk_outputs['sdf'].max().item()}")
+            field_outputs.append(chunk_outputs)
         
         # Perform gradient computation outside autocast for high precision
         for i in range(0, num_points, chunk_size):
@@ -655,21 +655,21 @@ def bundle_adjust_frames(
             [r[name] for r in field_outputs], dim=0) for name in field_outputs[0]}
         
         # Final loss computation within autocast
-        with torch.cuda.amp.autocast():
-            pred_sdf = field_outputs['sdf']
+        # with torch.cuda.amp.autocast():
+        pred_sdf = field_outputs['sdf']
 
-            # Loss computation
-            loss , loss_dict = loss_criteria(
-                pred_sdf, 
-                points_xyz=sampled_xyz,
-                grad=grad,
-                positive_sdf_mask=positive_sdf_mask,
-                negative_sdf_mask=negative_sdf_mask,
-                surface_mask=surface_mask,
-                perturbation_mask=perturbation_mask,
-                ray_sample_mask=ray_sample_mask,
-                gt_sdf=gt_sdf,
-            )
+        # Loss computation
+        loss , loss_dict = loss_criteria(
+            pred_sdf, 
+            points_xyz=sampled_xyz,
+            grad=grad,
+            positive_sdf_mask=positive_sdf_mask,
+            negative_sdf_mask=negative_sdf_mask,
+            surface_mask=surface_mask,
+            perturbation_mask=perturbation_mask,
+            ray_sample_mask=ray_sample_mask,
+            gt_sdf=gt_sdf,
+        )
             
         global_step = epoch * num_iterations + idx
         print(f"loss_dict: {loss_dict}")
