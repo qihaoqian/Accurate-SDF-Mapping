@@ -136,12 +136,22 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor ,torch::Tensor, torch::Te
     int frame_voxel_idx[points.size(0)][1];
     for (int i = 0; i < points.size(0); ++i)
     {
+        frame_voxel_idx[i][0] = -1;
         std::vector<int> features;
         std::vector<int> features_id;
 
         int x = points[i][0];
         int y = points[i][1];
         int z = points[i][2];
+
+        if (x < 0 || y < 0 || z < 0)
+        {
+            continue;
+        }
+        if (x >= size_ || y >= size_ || z >= size_)
+        {
+            continue;
+        }
 
         const unsigned int shift = MAX_BITS - max_level_ - 1;
 

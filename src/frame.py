@@ -6,26 +6,25 @@ from utils.sample_util import *
 rays_dir = None
 
 
-class RGBDFrame(nn.Module):
-    def __init__(self, fid, rgb, depth, K, offset, ref_pose=None) -> None:
+class DepthFrame(nn.Module):
+    def __init__(self, fid, depth, K, bound, offset, ref_pose=None) -> None:
         super().__init__()
         self.stamp = fid
         self.h, self.w = depth.shape
-        if type(rgb) != torch.Tensor:
-            rgb = torch.FloatTensor(rgb).cuda()
         if type(depth) != torch.Tensor:
             depth = torch.FloatTensor(depth).cuda()  # / 2
-        self.rgb = rgb.cuda()
         self.depth = depth.cuda()
         self.K = K
+        self.bound = bound
 
         if len(ref_pose.shape) != 2:
             ref_pose = ref_pose.reshape(4, 4)
         if type(ref_pose) != torch.Tensor:  # from gt data
             self.ref_pose = torch.tensor(ref_pose, requires_grad=False, dtype=torch.float32)
-            self.ref_pose[:3, 3] += offset  # Offset ensures voxel coordinates>0
         else:  # from tracked data
             self.ref_pose = ref_pose.clone().requires_grad_(False)
+        self.ref_pose[:3, 3] += offset  # Offset ensures voxel coordinates>0
+        self.ref_pose = self.ref_pose.cuda()
         # self.d_pose = OptimizablePose.from_matrix(torch.eye(4, requires_grad=False, dtype=torch.float32))
         self.precompute()
 
@@ -76,6 +75,14 @@ class RGBDFrame(nn.Module):
         self.rays_d = rays_dir
         self.points = self.rays_d * self.depth[..., None]
         self.valid_mask = self.depth > 0
+        points = self.points @ self.ref_pose[:3, :3].transpose(-1, -2) + self.ref_pose[:3, 3]
+        # print(points.view(-1, 3).min(dim=0).values)
+        # print(points.view(-1, 3).max(dim=0).values)
+        valid_mask = (points[..., 0] > self.bound[0][0]) & (points[..., 0] < self.bound[0][1]) & \
+                     (points[..., 1] > self.bound[1][0]) & (points[..., 1] < self.bound[1][1]) & \
+                     (points[..., 2] > self.bound[2][0]) & (points[..., 2] < self.bound[2][1])
+        self.valid_mask = valid_mask & self.valid_mask
+
 
     @torch.no_grad()
     def get_points(self):

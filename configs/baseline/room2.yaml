@@ -44,7 +44,7 @@ mapper_specs:
   num_iterations: 10
   max_voxel_hit: 10
   final_iter: 0
-  mesh_res: 256
+  mesh_res: 80
   overlap_th: 0.8
   kf_window_size: 8
   kf_selection_method: "multiple_max_set_coverage" # "random” or “multiple_max_set_coverage”

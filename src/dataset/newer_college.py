@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 class DataLoader(Dataset):
     def __init__(self, data_path, use_gt=False, max_depth=-1) -> None:
         self.data_path = data_path
-        self.num_imgs = len(glob(osp.join(self.data_path, "results/*.jpg")))
+        self.num_imgs = len(glob(osp.join(self.data_path, "results/*.png")))
         self.max_depth = max_depth
         self.use_gt = use_gt
         self.K = self.load_intrinsic()
@@ -19,9 +19,10 @@ class DataLoader(Dataset):
 
     def load_intrinsic(self):
         K = np.eye(3)
-        K[0, 0] = K[1, 1] = 600
-        K[0, 2] = 599.5
-        K[1, 2] = 339.5
+        K[0, 0] = 128.0
+        K[1, 1] = 64.0
+        K[0, 2] = 127.5
+        K[1, 2] = 63.5
 
         return K
 
@@ -41,7 +42,8 @@ class DataLoader(Dataset):
     def load_depth(self, index):
         depth = cv2.imread(
             osp.join(self.data_path, 'results/depth{:06d}.png'.format(index)), -1)
-        depth = depth / 6553.5
+        # print(depth.shape,depth.dtype)
+        depth = depth / 1000.0
         if self.max_depth > 0:
             depth[depth > self.max_depth] = 0
         return depth

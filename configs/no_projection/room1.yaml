@@ -2,7 +2,7 @@ log_dir: './logs'
 decoder: parallel_hash_net
 dataset: replica
 
-exp_name: replica/room1/baseline
+exp_name: replica/no_projection/room1
 
 criteria:
   boundary_loss_weight: 1000
@@ -12,7 +12,7 @@ criteria:
   heat_weight: 0
   sign_weight_free: 0
   sign_weight_occ: 0
-  projection_weight: 100
+  projection_weight: 0
   grad_dir_weight: 0
   heat_lambda: 4
   h1: 0.02

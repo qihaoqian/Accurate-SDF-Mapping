@@ -36,12 +36,11 @@ class Decoder(nn.Module):
                     "activation": "ReLU",
                     "output_activation": "None",
                     "n_neurons": 64,
-                    "n_hidden_la2yers": 1,
+                    "n_hidden_layers": 1,
                 }
             )
 
     def get_sdf(self, xyz):
-        # xyz = (xyz - self.bound[:, 0].to(xyz.device)) / self.max_dis.to(xyz.device)
         xyz = (xyz - self.bound[:, 0].to(xyz.device)) / self.bound_dis.to(xyz.device)
         sdf = self.hash_sdf_out(xyz)
         return sdf

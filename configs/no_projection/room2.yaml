@@ -2,7 +2,7 @@ log_dir: './logs'
 decoder: parallel_hash_net
 dataset: replica
 
-exp_name: replica/room1/baseline
+exp_name: replica/no_projection/room2
 
 criteria:
   boundary_loss_weight: 1000
@@ -12,7 +12,7 @@ criteria:
   heat_weight: 0
   sign_weight_free: 0
   sign_weight_occ: 0
-  projection_weight: 100
+  projection_weight: 0
   grad_dir_weight: 0
   heat_lambda: 4
   h1: 0.02
@@ -23,7 +23,7 @@ decoder_specs:
   F_entry: 2  # Number of feature dimensions per entry
   log2_T: 19  # each level's hashmap_size =  F_entry * (2**F_entry)
   b: 2.0  # each level's resolution = N_min * (b**Level)
-  bound: [[0.0, 6.43], [1.33, 5.1], [1.7, 4.74]]
+  bound: [[0.95, 5.18], [0.0, 6.14], [1.55, 4.59]]
 
 sample_specs:
   N: 1
@@ -51,7 +51,7 @@ mapper_specs:
   kf_selection_random_radio: 0.5   # random keyframe ratio
   insert_method: "intersection" # "naive" or "intersection"
   insert_ratio: 0.85
-  offset: 3.22 # used to make make the coordinate of each point positive
+  offset: 3.07 # used to make make the coordinate of each point positive
   use_adaptive_ending: True # adaptive iteration
 
 debug_args:
@@ -59,7 +59,7 @@ debug_args:
   render_res: [ 320, 240 ]
 
 data_specs:
-  data_path: './Datasets/Replica/room1'
+  data_path: './Datasets/Replica/room2'
   max_depth: 10
   use_gt: True
 

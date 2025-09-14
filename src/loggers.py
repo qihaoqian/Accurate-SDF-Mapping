@@ -41,13 +41,14 @@ class BasicLogger:
         decoder_state = {f: v.cpu()
                          for f, v in mapper.decoder.state_dict().items()}
         map_state = {f: v.cpu() for f, v in mapper.map_states.items()}
-        sdf_priors = mapper.sdf_priors.cpu()
-        vector_features = mapper.vector_features.cpu()
+        # sdf_priors = mapper.sdf_priors.cpu()
+        # vector_features = mapper.vector_features.cpu()
         torch.save({
             "decoder_state": decoder_state,
             "map_state": map_state,
-            "sdf_priors": sdf_priors,
-            "vector_features": vector_features},
+            # "sdf_priors": sdf_priors,
+            # "vector_features": vector_features
+            },
             os.path.join(self.ckpt_dir, name))
 
     def log_config(self, config):

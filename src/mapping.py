@@ -4,14 +4,13 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import os
-
+from copy import deepcopy
 from criterion import Criterion
-from frame import RGBDFrame
+from frame import DepthFrame
 from functions.render_helpers import bundle_adjust_frames
 from loggers import BasicLogger
 from utils.import_util import get_decoder, get_property
 from utils.keyframe_util import multiple_max_set_coverage
-from utils.mesh_util import MeshExtractor
 from functions.render_helpers import get_features
 from torch.utils.tensorboard import SummaryWriter
 
@@ -74,13 +73,11 @@ class Mapping:
         
         self.max_distance = data_specs["max_depth"]
 
-        # self.render_freq = debug_args["render_freq"]
-        # self.render_res = debug_args["render_res"]
-        # self.mesh_freq = debug_args["mesh_freq"]
-        # self.save_ckpt_freq = debug_args["save_ckpt_freq"]
-
-        self.mesher = MeshExtractor(args)
-
+        # self.sdf_priors = torch.full(
+        #     (self.num_vertexes, 1),
+        #     fill_value=args.mapper_specs["init_sdf_priors"],
+        #     requires_grad=True, dtype=torch.float32,
+        #     device=torch.device("cuda"))
         self.sdf_priors = torch.zeros(
             (self.num_vertexes, 1),
             requires_grad=True, dtype=torch.float32,
@@ -100,7 +97,14 @@ class Mapping:
         self.scaler = torch.amp.GradScaler('cuda')
 
         self.frame_poses = []
-        self.bound = args.decoder_specs["bound"]
+        self.bound = deepcopy(args.decoder_specs["bound"])
+        self.sample_bound = deepcopy(args.decoder_specs["bound"])
+        self.sample_bound[0][0] += args.decoder_specs["sample_bound_margin"]
+        self.sample_bound[0][1] -= args.decoder_specs["sample_bound_margin"]
+        self.sample_bound[1][0] += args.decoder_specs["sample_bound_margin"]
+        self.sample_bound[1][1] -= args.decoder_specs["sample_bound_margin"]
+        self.sample_bound[2][0] += args.decoder_specs["sample_bound_margin"]
+        self.sample_bound[2][1] -= args.decoder_specs["sample_bound_margin"]
 
     def mapping_step(self, frame_id, tracked_frame, epoch):
         ######################
@@ -133,8 +137,6 @@ class Mapping:
         self.kf_optimized_voxels = None
         self.kf_all_voxels = None
 
-        if self.mesher is not None:
-            self.mesher.rays_d = first_frame.get_rays()
         self.create_voxels(first_frame)
         self.sdf_priors = self.map_states["sdf_priors"]
         self.vector_features = self.map_states["vector_features"]
@@ -146,9 +148,10 @@ class Mapping:
         progress_bar = tqdm(range(self.start_frame, self.end_frame), position=0)
         progress_bar.set_description("mapping frame")
         epoch = 0
+
         for frame_id in progress_bar:
             data_in = self.data_stream[frame_id]
-            tracked_frame = RGBDFrame(*data_in[:-1], offset=self.offset, ref_pose=data_in[-1])
+            tracked_frame = DepthFrame(*data_in[:-1], bound=self.sample_bound, offset=self.offset, ref_pose=data_in[-1])
 
             if tracked_frame.ref_pose.isinf().any():
                 continue
@@ -164,7 +167,7 @@ class Mapping:
         print("******* extracting final mesh *******")
         self.kf_graph = None
         self.logger.log_ckpt(self, name="final_ckpt.pth")
-        mesh, u, u_priors, u_hash_features = self.extract_mesh(res=self.mesh_res, map_states=self.map_states)
+        mesh, mesh_priors, u, u_priors, u_hash_features = self.extract_mesh(res=self.mesh_res, map_states=self.map_states)
         
         self.logger.log_numpy_data(self.extract_voxels(map_states=self.map_states), "final_voxels")
         
@@ -182,15 +185,17 @@ class Mapping:
 
         if self.args.evaluate:
             # 动态导入以避免循环导入问题
-            from evaluate import evaluate
-            evaluate(self.args)
+            from evaluate_mesh import evaluate_mesh
+            from evaluate_sdf import evaluate_sdf
+            evaluate_mesh(self.args)
+            evaluate_sdf(self.args)
         
         print("******* mapping process died *******")
 
     def initfirst_onlymap(self):
         init_pose = self.data_stream.get_init_pose(self.start_frame)
-        fid, rgb, depth, K, _ = self.data_stream[self.start_frame]
-        first_frame = RGBDFrame(fid, rgb, depth, K, offset=self.offset, ref_pose=init_pose)
+        fid, depth, K, _ = self.data_stream[self.start_frame]
+        first_frame = DepthFrame(fid, depth, K, bound=self.sample_bound, offset=self.offset, ref_pose=init_pose)
 
         print("******* initializing first_frame: %d********" % first_frame.stamp)
         self.last_frame = first_frame
@@ -291,7 +296,6 @@ class Mapping:
         voxels = torch.div(points, self.voxel_size, rounding_mode='floor')  # Divides each element
 
         voxels_raw, inverse_indices, counts = torch.unique(voxels, dim=0, return_inverse=True, return_counts=True)
-
         voxels_vaild = voxels_raw[counts > 3]
         self.voxels_vaild = voxels_vaild
 
@@ -328,7 +332,7 @@ class Mapping:
         self.map_states = map_states
 
     @torch.no_grad()
-    def extract_mesh(self, res=256, map_states=None):
+    def extract_mesh(self, res=80, map_states=None):
         from functions.render_helpers import find_voxel_idx
         from torch.nn import functional as F
         sdf_network = self.decoder
@@ -344,18 +348,13 @@ class Mapping:
         y_range = y_max - y_min
         z_range = z_max - z_min
         
-        # Find minimum range as baseline to ensure consistent point spacing
-        min_range = min(x_range, y_range, z_range)
-        spacing = min_range / (res - 1)  # baseline point spacing
-        
-        # Calculate resolution for each dimension based on range and baseline spacing
-        x_res = int(x_range / spacing) + 1
-        y_res = int(y_range / spacing) + 1
-        z_res = int(z_range / spacing) + 1
-        
+        x_res = int(torch.round(torch.tensor(x_range * res)).item()) + 1
+        y_res = int(torch.round(torch.tensor(y_range * res)).item()) + 1
+        z_res = int(torch.round(torch.tensor(z_range * res)).item()) + 1
+
         x = torch.linspace(x_min, x_max, x_res)
         y = torch.linspace(y_min, y_max, y_res)
-        z = torch.linspace(z_min, z_max, z_res) 
+        z = torch.linspace(z_min, z_max, z_res)
         x, y, z = torch.meshgrid(x, y, z, indexing='ij')
         points = torch.stack([x.flatten(), y.flatten(), z.flatten()], dim=-1)
         points = points.cuda()
@@ -403,6 +402,7 @@ class Mapping:
         u = sdf_pred.reshape(x_res, y_res, z_res).cpu().numpy()
         u_priors = sdf_priors.reshape(x_res, y_res, z_res).cpu().numpy()
         u_hash_features = hash_features.reshape(x_res, y_res, z_res).cpu().numpy()
+
         import mcubes, trimesh
         vertices, triangles = mcubes.marching_cubes(u, 0)
         # Correct scaling logic: convert grid indices to actual coordinates
@@ -422,7 +422,7 @@ class Mapping:
             mesh_priors.export(out_path_priors)
             print(f"==> mesh saved to {out_path}")
             print(f"==> mesh_priors saved to {out_path_priors}")
-        return mesh, u, u_priors, u_hash_features
+        return mesh, mesh_priors, u, u_priors, u_hash_features
 
     @torch.no_grad()
     def extract_voxels(self, map_states=None):
