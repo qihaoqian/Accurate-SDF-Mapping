@@ -73,11 +73,6 @@ class Mapping:
         
         self.max_distance = data_specs["max_depth"]
 
-        # self.sdf_priors = torch.full(
-        #     (self.num_vertexes, 1),
-        #     fill_value=args.mapper_specs["init_sdf_priors"],
-        #     requires_grad=True, dtype=torch.float32,
-        #     device=torch.device("cuda"))
         self.sdf_priors = torch.zeros(
             (self.num_vertexes, 1),
             requires_grad=True, dtype=torch.float32,
@@ -88,7 +83,7 @@ class Mapping:
             device=torch.device("cuda"))
 
         self.svo = torch.classes.svo.Octree()
-        self.svo.init(256, int(self.num_vertexes), self.voxel_size, 5)  # Must be a multiple of 2
+        self.svo.init(256, int(self.num_vertexes), self.voxel_size, 0)  # Must be a multiple of 2
         self.optimize_params = [{'params': self.decoder.parameters(), 'lr': 1e-2},
                                 {'params': self.sdf_priors, 'lr': 1e-2},
                                 {'params': self.vector_features, 'lr': 1e-2}]
@@ -97,14 +92,8 @@ class Mapping:
         self.scaler = torch.amp.GradScaler('cuda')
 
         self.frame_poses = []
-        self.bound = deepcopy(args.decoder_specs["bound"])
-        self.sample_bound = deepcopy(args.decoder_specs["bound"])
-        self.sample_bound[0][0] += args.decoder_specs["sample_bound_margin"]
-        self.sample_bound[0][1] -= args.decoder_specs["sample_bound_margin"]
-        self.sample_bound[1][0] += args.decoder_specs["sample_bound_margin"]
-        self.sample_bound[1][1] -= args.decoder_specs["sample_bound_margin"]
-        self.sample_bound[2][0] += args.decoder_specs["sample_bound_margin"]
-        self.sample_bound[2][1] -= args.decoder_specs["sample_bound_margin"]
+        self.bound = args.decoder_specs["bound"]
+
 
     def mapping_step(self, frame_id, tracked_frame, epoch):
         ######################
@@ -151,7 +140,7 @@ class Mapping:
 
         for frame_id in progress_bar:
             data_in = self.data_stream[frame_id]
-            tracked_frame = DepthFrame(*data_in[:-1], bound=self.sample_bound, offset=self.offset, ref_pose=data_in[-1])
+            tracked_frame = DepthFrame(*data_in[:-1], offset=self.offset, ref_pose=data_in[-1])
 
             if tracked_frame.ref_pose.isinf().any():
                 continue
@@ -195,7 +184,7 @@ class Mapping:
     def initfirst_onlymap(self):
         init_pose = self.data_stream.get_init_pose(self.start_frame)
         fid, depth, K, _ = self.data_stream[self.start_frame]
-        first_frame = DepthFrame(fid, depth, K, bound=self.sample_bound, offset=self.offset, ref_pose=init_pose)
+        first_frame = DepthFrame(fid, depth, K, offset=self.offset, ref_pose=init_pose)
 
         print("******* initializing first_frame: %d********" % first_frame.stamp)
         self.last_frame = first_frame

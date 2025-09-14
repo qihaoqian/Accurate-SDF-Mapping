@@ -7,7 +7,7 @@ echo "开始执行所有baseline配置文件..."
 echo "======================================"
 
 # 获取所有yaml配置文件并排序
-config_files=(configs/no_projection/*.yaml)
+config_files=(configs/sparse_octree/*.yaml)
 IFS=$'\n' sorted_files=($(sort <<<"${config_files[*]}"))
 unset IFS
 

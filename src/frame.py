@@ -7,7 +7,7 @@ rays_dir = None
 
 
 class DepthFrame(nn.Module):
-    def __init__(self, fid, depth, K, bound, offset, ref_pose=None) -> None:
+    def __init__(self, fid, depth, K, offset, ref_pose=None) -> None:
         super().__init__()
         self.stamp = fid
         self.h, self.w = depth.shape
@@ -15,7 +15,6 @@ class DepthFrame(nn.Module):
             depth = torch.FloatTensor(depth).cuda()  # / 2
         self.depth = depth.cuda()
         self.K = K
-        self.bound = bound
 
         if len(ref_pose.shape) != 2:
             ref_pose = ref_pose.reshape(4, 4)
@@ -75,13 +74,6 @@ class DepthFrame(nn.Module):
         self.rays_d = rays_dir
         self.points = self.rays_d * self.depth[..., None]
         self.valid_mask = self.depth > 0
-        points = self.points @ self.ref_pose[:3, :3].transpose(-1, -2) + self.ref_pose[:3, 3]
-        # print(points.view(-1, 3).min(dim=0).values)
-        # print(points.view(-1, 3).max(dim=0).values)
-        valid_mask = (points[..., 0] > self.bound[0][0]) & (points[..., 0] < self.bound[0][1]) & \
-                     (points[..., 1] > self.bound[1][0]) & (points[..., 1] < self.bound[1][1]) & \
-                     (points[..., 2] > self.bound[2][0]) & (points[..., 2] < self.bound[2][1])
-        self.valid_mask = valid_mask & self.valid_mask
 
 
     @torch.no_grad()

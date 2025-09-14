@@ -67,10 +67,10 @@ def load_checkpoint(ckpt_path, args=None):
     
     # 3. Create data stream (for initialization)
     data_stream = get_dataset(args)
-    data_in = data_stream[0]
-    first_frame = DepthFrame(*data_in[:-1], offset=args.mapper_specs['offset'], 
-                           ref_pose=data_in[-1]).cuda()
-    W, H = first_frame.depth.shape[1], first_frame.depth.shape[0]
+    # data_in = data_stream[0]
+    # first_frame = DepthFrame(*data_in[:-1], offset=args.mapper_specs['offset'], 
+                        #    ref_pose=data_in[-1]).cuda()
+    # W, H = first_frame.depth.shape[1], first_frame.depth.shape[0]
     
     # 4. Create logger and mapper
     logger = BasicLogger(args, for_eva=True)
