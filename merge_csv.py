@@ -7,7 +7,7 @@ def merge_csv_files():
     """合并logs/metric目录中的CSV文件"""
     
     # 定义目录路径
-    metric_dir = "logs/metric"
+    metric_dir = "logs/metric/baseline2.0"
     
     # 定义三种类型的文件模式
     file_patterns = {
@@ -39,19 +39,34 @@ def merge_csv_files():
                 df = pd.read_csv(file_path)
                 # 从文件名提取场景信息
                 filename = os.path.basename(file_path)
+                scene_id = None
                 if "room" in filename:
-                    scene_type = "room"
-                    scene_num = filename.split("room")[1].split(".")[0]
+                    idx = filename.find("room")
+                    # 提取 room 后面的数字
+                    rest = filename[idx:]
+                    num = ""
+                    for c in rest[4:]:
+                        if c.isdigit():
+                            num += c
+                        else:
+                            break
+                    scene_id = f"room{num}" if num else "room"
                 elif "office" in filename:
-                    scene_type = "office"
-                    scene_num = filename.split("office")[1].split(".")[0]
+                    idx = filename.find("office")
+                    # 提取 office 后面的数字
+                    rest = filename[idx:]
+                    num = ""
+                    for c in rest[6:]:
+                        if c.isdigit():
+                            num += c
+                        else:
+                            break
+                    scene_id = f"office{num}" if num else "office"
                 else:
-                    scene_type = "unknown"
-                    scene_num = "0"
+                    scene_id = "unknown"
                 
-                # 添加场景信息列
-                df['scene_type'] = scene_type
-                df['scene_number'] = scene_num
+                # 添加场景信息列（合并为 room0/office1 格式）
+                df['scene_id'] = scene_id
                 df['filename'] = filename
                 
                 dataframes.append(df)
@@ -84,7 +99,7 @@ def merge_csv_files():
         
         if all_dataframes:
             final_merged = pd.concat(all_dataframes, ignore_index=True)
-            final_output = "logs/metric/merged_all_metrics.csv"
+            final_output = "logs/metric/baseline2.0/merged_all_metrics.csv"
             final_merged.to_csv(final_output, index=False)
             print(f"已保存总体合并文件: {final_output}")
             print(f"总体数据形状: {final_merged.shape}")

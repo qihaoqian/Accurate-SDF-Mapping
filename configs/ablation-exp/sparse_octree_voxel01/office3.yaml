@@ -3,7 +3,7 @@ log_dir: './logs'
 decoder: parallel_hash_net
 dataset: replica
 
-exp_name: replica/ablation-exp/baseline2.0/office3-0.1
+exp_name: replica/ablation-exp/sparse_octree_voxel01/office3
 
 criteria:
   boundary_loss_weight: 1000
@@ -43,7 +43,7 @@ mapper_specs:
   num_vertexes: 250000
   inflate_margin_ratio: 0.1
   voxel_size: 0.1
-  full_depth: 5
+  full_depth: 0
   num_iterations: 1
   init_num_iterations: 10
   num_init_frames: 2

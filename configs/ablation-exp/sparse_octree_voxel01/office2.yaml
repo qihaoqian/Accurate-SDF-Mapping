@@ -3,7 +3,7 @@ log_dir: './logs'
 decoder: parallel_hash_net
 dataset: replica
 
-exp_name: replica/ablation-exp/baseline2.0/office3-0.1
+exp_name: replica/ablation-exp/sparse_octree_voxel01/office2
 
 criteria:
   boundary_loss_weight: 1000
@@ -26,7 +26,7 @@ decoder_specs:
   b: 2.0  # each level's resolution = N_min * (b**Level)
   mlp_layer: 5
   mlp_hidden_dim: 64
-  bound: [[0.0, 8.38], [1.53, 6.85], [2.5, 5.88]]
+  bound: [[0.0, 7.52], [1.63, 5.89], [2.23, 5.29]]
   activation: "LeakyReLU"
 sample_specs:
   N: 1
@@ -40,10 +40,10 @@ mapper_specs:
   start_frame: 0
   end_frame: -1
   N_rays_each: 20480 # mapping's sampling ray
-  num_vertexes: 250000
+  num_vertexes: 200000
   inflate_margin_ratio: 0.1
   voxel_size: 0.1
-  full_depth: 5
+  full_depth: 0
   num_iterations: 1
   init_num_iterations: 10
   num_init_frames: 2
@@ -55,14 +55,14 @@ mapper_specs:
   kf_selection_method: "multiple_max_set_coverage" # "random” or “multiple_max_set_coverage”
   insert_method: "intersection" # "naive" or "intersection"
   insert_ratio: 0.85
-  offset: 4.19 # used to make make the coordinate of each point positive
+  offset: 3.76 # used to make make the coordinate of each point positive
 
 debug_args:
   verbose: false
   render_res: [ 320, 240 ]
 
 data_specs:
-  data_path: './Datasets/Replica/office3'
+  data_path: './Datasets/Replica/office2'
   max_depth: 10
   use_gt: True
 

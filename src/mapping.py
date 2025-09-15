@@ -167,7 +167,7 @@ class Mapping:
 
         self.save_sdf_slice(u, save_dir=save_dir, title="SDF")
         self.save_sdf_slice(u_priors, save_dir=save_dir, title="SDF Priors")
-        self.save_sdf_slice(u_hash_features, save_dir=save_dir, title="Hash Features")
+        self.save_sdf_slice(u_hash_features, save_dir=save_dir, title="Hash Features", draw_contour=False)
         # # Save u to file for subsequent analysis
         # np.save(os.path.join(save_dir, "sdf_u.npy"), u.cpu().numpy() if hasattr(u, "cpu") else u)
         # np.save(os.path.join(save_dir, "sdf_priors.npy"), u_priors.cpu().numpy() if hasattr(u_priors, "cpu") else u_priors)
@@ -432,7 +432,7 @@ class Mapping:
         return voxels
 
     @torch.no_grad()
-    def save_sdf_slice(self, u, save_dir=None, title=None):
+    def save_sdf_slice(self, u, save_dir=None, title=None, draw_contour=True):
         import matplotlib.pyplot as plt
         import numpy as np
 
@@ -522,14 +522,15 @@ class Mapping:
             )
             
             # Add contour lines
-            levels = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
-            cs = plt.contour(coord1_grid, coord2_grid, sdf_slice, 
-                           levels=levels, colors='black', alpha=0.3, linewidths=0.5)
-            
-            # Highlight zero contour line (surface)
-            zero_contour = plt.contour(coord1_grid, coord2_grid, sdf_slice, 
-                                     levels=[0], colors='red', linewidths=2)
-            
+            if draw_contour:
+                levels = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
+                cs = plt.contour(coord1_grid, coord2_grid, sdf_slice, 
+                            levels=levels, colors='black', alpha=0.3, linewidths=0.5)
+                
+                # Highlight zero contour line (surface)
+                zero_contour = plt.contour(coord1_grid, coord2_grid, sdf_slice, 
+                                        levels=[0], colors='red', linewidths=2)
+                
             plt.colorbar(im, label='SDF Value', shrink=0.8)
             plt.xlabel(f'{coord_names[0]} (m)', fontsize=12)
             plt.ylabel(f'{coord_names[1]} (m)', fontsize=12)

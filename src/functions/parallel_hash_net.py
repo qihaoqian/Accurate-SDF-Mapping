@@ -45,11 +45,11 @@ class Decoder(nn.Module):
 
     def get_sdf(self, xyz):
         xyz = (xyz - self.bound[:, 0].to(xyz.device)) / self.bound_dis.to(xyz.device)
-        sdf = self.hash_sdf_out(xyz)
+        sdf = self.hash_sdf_out(xyz) * 0.1
         return sdf
 
     def forward(self, xyz):
-        sdf = self.get_sdf(xyz) * 0.1
+        sdf = self.get_sdf(xyz) 
 
         return {
             'sdf': sdf[:, 0],

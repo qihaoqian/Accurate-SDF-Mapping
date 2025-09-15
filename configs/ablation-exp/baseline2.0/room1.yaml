@@ -3,7 +3,7 @@ log_dir: './logs'
 decoder: parallel_hash_net
 dataset: replica
 
-exp_name: replica/ablation-exp/baseline2.0/room1
+exp_name: replica/ablation-exp/baseline2.0/room1-0.1
 
 criteria:
   boundary_loss_weight: 1000
@@ -42,7 +42,7 @@ mapper_specs:
   N_rays_each: 20480 # mapping's sampling ray
   num_vertexes: 200000
   inflate_margin_ratio: 0.1
-  voxel_size: 0.05
+  voxel_size: 0.1
   full_depth: 5
   num_iterations: 1
   init_num_iterations: 10
