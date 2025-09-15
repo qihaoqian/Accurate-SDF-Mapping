@@ -460,15 +460,8 @@ def bundle_adjust_frames(
     
     gt_sdf = nearest_distances.reshape(-1, 1)
     
-    # valid_mask = (sampled_xyz[:, 0] > bound[0][0]) & (sampled_xyz[:, 0] < bound[0][1]) & \
-    #              (sampled_xyz[:, 1] > bound[1][0]) & (sampled_xyz[:, 1] < bound[1][1]) & \
-    #              (sampled_xyz[:, 2] > bound[2][0]) & (sampled_xyz[:, 2] < bound[2][1])
-    # print(sampled_xyz.view(-1, 3).min(dim=0).values)
-    # print(sampled_xyz.view(-1, 3).max(dim=0).values)
     point_voxel_idx = find_voxel_idx(sampled_xyz, map_states)
-    # sampled_xyz = sampled_xyz[valid_mask]
-    # point_voxel_idx = point_voxel_idx[valid_mask]
-    # Package sampled_xyz, sampled_depth, negative_sdf_mask, point_voxel_idx into a dictionary samples_valid
+
     samples = {
         'sampled_point_xyz': sampled_xyz,
         'sampled_point_voxel_idx': point_voxel_idx,

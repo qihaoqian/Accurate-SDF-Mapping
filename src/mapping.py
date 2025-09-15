@@ -60,6 +60,7 @@ class Mapping:
         self.voxel_size = mapper_specs["voxel_size"]
         self.kf_window_size = mapper_specs["kf_window_size"]
         self.num_iterations = mapper_specs["num_iterations"]
+        self.init_num_iterations = mapper_specs["init_num_iterations"]
         self.n_rays = mapper_specs["N_rays_each"]
         self.max_voxel_hit = mapper_specs["max_voxel_hit"]
         self.step_size = mapper_specs["step_size"] * self.voxel_size
@@ -70,7 +71,7 @@ class Mapping:
         self.insert_method = mapper_specs["insert_method"]
         self.insert_ratio = mapper_specs["insert_ratio"]
         self.num_vertexes = mapper_specs["num_vertexes"]
-        
+        self.full_depth = mapper_specs["full_depth"]
         self.max_distance = data_specs["max_depth"]
 
         self.sdf_priors = torch.zeros(
@@ -83,7 +84,7 @@ class Mapping:
             device=torch.device("cuda"))
 
         self.svo = torch.classes.svo.Octree()
-        self.svo.init(256, int(self.num_vertexes), self.voxel_size, 0)  # Must be a multiple of 2
+        self.svo.init(256, int(self.num_vertexes), self.voxel_size, self.full_depth)  # Must be a multiple of 2
         self.optimize_params = [{'params': self.decoder.parameters(), 'lr': 1e-2},
                                 {'params': self.sdf_priors, 'lr': 1e-2},
                                 {'params': self.vector_features, 'lr': 1e-2}]
@@ -194,6 +195,7 @@ class Mapping:
     def do_mapping(self, tracked_frame=None, epoch=0):
         self.decoder.train()
         optimize_targets = self.select_optimize_targets(tracked_frame)
+        num_iterations = max(self.num_iterations, self.init_num_iterations - epoch)
         bundle_adjust_frames(
             optimize_targets,
             self.map_states,
@@ -201,7 +203,7 @@ class Mapping:
             self.loss_criteria,
             self.voxel_size,
             self.n_rays,
-            self.num_iterations,
+            num_iterations,
             self.bound,
             optim=self.optim,
             scaler=self.scaler,
