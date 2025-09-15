@@ -17,8 +17,9 @@ class BasicLogger:
     def __init__(self, args, for_eva=False) -> None:
         self.args = args
         self.log_dir = osp.join(
-            # args.log_dir, args.exp_name, self.get_random_time_str())
-            args.log_dir, args.exp_name)
+            # args.log_dir, args.exp_name, self.get_random_time_str()
+            args.log_dir, args.exp_name
+        )
         self.img_dir = osp.join(self.log_dir, "imgs",)
         self.mesh_dir = osp.join(self.log_dir, "mesh")
         self.ckpt_dir = osp.join(self.log_dir, "ckpt")

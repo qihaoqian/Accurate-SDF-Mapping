@@ -379,15 +379,13 @@ def bundle_adjust_frames(
         voxel_size,
         N_rays=512,
         num_iterations=10,
-        bound=None,
         optim=None,
-        scaler=None,
-        frame_id=None,
-        use_adaptive_ending=False,
         writer=None,
-        epoch=0,
+        global_step=0,
         h1=0.05,
         sample_specs=None,
+        epoch=0,
+        frame_id=0,
 ):
     # sample rays from keyframes
     rays_o_all, rays_d_all, rgb_samples_all, depth_samples_all = [], [], [], []
@@ -396,7 +394,7 @@ def bundle_adjust_frames(
         pose = frame.get_ref_pose().cuda()
         valid_idx = torch.nonzero(frame.valid_mask.reshape(-1))
         sample_idx = valid_idx[torch.randint(low=0, high=int(valid_idx.shape[0]),
-                                             size=(int(num_iterations * (N_rays / num_keyframe)),))][:, 0]
+                                             size=(int(N_rays / num_keyframe),))][:, 0]
         sampled_rays_d = frame.rays_d.cuda().reshape(-1, 3)[sample_idx]
         R = pose[: 3, : 3].transpose(-1, -2)
         sampled_rays_d = sampled_rays_d @ R
@@ -468,8 +466,8 @@ def bundle_adjust_frames(
     }
 
     chunk_size = 100000000
-    idx = 0
-    for _ in range(num_iterations):
+    backward_cnt = 0
+    for idx in range(num_iterations):
         optim.zero_grad()
         num_points = sampled_xyz.shape[0]
         field_outputs = []
@@ -517,28 +515,30 @@ def bundle_adjust_frames(
             gt_sdf=gt_sdf,
         )
             
-        global_step = epoch * num_iterations + idx
-        tqdm.write(f"loss_dict: {loss_dict}")
+        global_step += 1
         if writer is not None:
             writer.add_scalar('loss/total_loss', loss.item(), global_step)
             for key, value in loss_dict.items():
                 writer.add_scalar(f'loss/{key}', value, global_step)
             
-        if use_adaptive_ending:
-            loss_all += loss.item()
-            loss_mean = loss_all / (epoch + 1)
-            if loss_mean < loss:
-                exceed_cnt += 1
-            else:
-                exceed_cnt = 0
-            if exceed_cnt >= 2 and frame_id != 0:
-                break
-        idx += 1
+        # loss_all += loss.item()
+        # loss_mean = loss_all / (epoch + 1)
+        # if loss_mean < loss:
+        #     exceed_cnt += 1
+        # else:
+        #     exceed_cnt = 0
+        # if exceed_cnt >= 2 and frame_id != 0:
+        #     break
+
         loss.backward()
         optim.step()
-        # scaler.scale(loss).backward()
-        # scaler.step(optim)
-        # scaler.update()
+        
+        backward_cnt += 1
+        tqdm.write(f"idx: {idx},loss_dict: {loss_dict}")
+
+    if writer is not None:
+        writer.add_scalar(f"iterations", backward_cnt, frame_id)
+    return global_step, backward_cnt
 
 def find_voxel_idx(points, map_states):
     """

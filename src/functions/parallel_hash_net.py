@@ -13,6 +13,7 @@ class Decoder(nn.Module):
                  b=None,
                  mlp_layer=None,
                  mlp_hidden_dim=None,
+                 activation="ReLU",
                  **kwargs):
         super().__init__()
 
@@ -35,7 +36,7 @@ class Decoder(nn.Module):
                 },
                 network_config={
                     "otype": "FullyFusedMLP",
-                    "activation": "ReLU",
+                    "activation": activation,
                     "output_activation": "None",
                     "n_neurons": mlp_hidden_dim,
                     "n_hidden_layers": mlp_layer,

@@ -3,7 +3,7 @@ log_dir: './logs'
 decoder: parallel_hash_net
 dataset: replica
 
-exp_name: replica/ablation-exp/baseline/room1
+exp_name: replica/ablation-exp/baseline2.0/room1
 
 criteria:
   boundary_loss_weight: 1000
@@ -27,7 +27,7 @@ decoder_specs:
   bound: [[0.0, 6.43], [1.33, 5.1], [1.7, 4.74]]
   mlp_layer: 5
   mlp_hidden_dim: 64
-
+  activation: "LeakyReLU"
 sample_specs:
   N: 1
   M: 2
@@ -47,7 +47,7 @@ mapper_specs:
   num_iterations: 1
   init_num_iterations: 10
   num_init_frames: 2
-  max_voxel_hit: 10
+  lr: 0.005
   final_iter: 0
   mesh_res: 80
   overlap_th: 0.8

@@ -3,7 +3,7 @@ log_dir: './logs'
 decoder: parallel_hash_net
 dataset: replica
 
-exp_name: replica/ablation-exp/baseline/room1
+exp_name: replica/ablation-exp/baseline2.0/office1
 
 criteria:
   boundary_loss_weight: 1000
@@ -24,9 +24,10 @@ decoder_specs:
   F_entry: 2  # Number of feature dimensions per entry
   log2_T: 19  # each level's hashmap_size =  F_entry * (2**F_entry)
   b: 2.0  # each level's resolution = N_min * (b**Level)
-  bound: [[0.0, 6.43], [1.33, 5.1], [1.7, 4.74]]
   mlp_layer: 5
   mlp_hidden_dim: 64
+  bound: [[0.69, 3.9], [0.75, 3.85], [0.0, 4.59]]
+  activation: "LeakyReLU"
 
 sample_specs:
   N: 1
@@ -47,7 +48,7 @@ mapper_specs:
   num_iterations: 1
   init_num_iterations: 10
   num_init_frames: 2
-  max_voxel_hit: 10
+  lr: 0.005
   final_iter: 0
   mesh_res: 80
   overlap_th: 0.8
@@ -55,14 +56,14 @@ mapper_specs:
   kf_selection_method: "multiple_max_set_coverage" # "random” or “multiple_max_set_coverage”
   insert_method: "intersection" # "naive" or "intersection"
   insert_ratio: 0.85
-  offset: 3.22 # used to make make the coordinate of each point positive
+  offset: 2.23 # used to make make the coordinate of each point positive
 
 debug_args:
   verbose: false
   render_res: [ 320, 240 ]
 
 data_specs:
-  data_path: './Datasets/Replica/room1'
+  data_path: './Datasets/Replica/office1'
   max_depth: 10
   use_gt: True
 

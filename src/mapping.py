@@ -29,6 +29,7 @@ class Mapping:
         self.sample_specs = args.sample_specs
         self.h1 = args.criteria["h1"]
         self.writer = SummaryWriter(log_dir=self.logger.misc_dir)
+        self.global_step = 0
 
         # get data stream
         if data_stream != None:
@@ -56,16 +57,12 @@ class Mapping:
         self.save_data_freq = get_property(debug_args, "save_data_freq", 0)
 
         # required args
-        self.use_adaptive_ending = mapper_specs["use_adaptive_ending"]
         self.voxel_size = mapper_specs["voxel_size"]
         self.kf_window_size = mapper_specs["kf_window_size"]
         self.num_iterations = mapper_specs["num_iterations"]
         self.init_num_iterations = mapper_specs["init_num_iterations"]
+        self.num_init_frames = mapper_specs["num_init_frames"]
         self.n_rays = mapper_specs["N_rays_each"]
-        self.max_voxel_hit = mapper_specs["max_voxel_hit"]
-        self.step_size = mapper_specs["step_size"] * self.voxel_size
-        self.inflate_margin_ratio = mapper_specs["inflate_margin_ratio"]
-        self.kf_selection_random_radio = mapper_specs["kf_selection_random_radio"]
         self.offset = mapper_specs["offset"]
         self.kf_selection_method = mapper_specs["kf_selection_method"]
         self.insert_method = mapper_specs["insert_method"]
@@ -85,15 +82,17 @@ class Mapping:
 
         self.svo = torch.classes.svo.Octree()
         self.svo.init(256, int(self.num_vertexes), self.voxel_size, self.full_depth)  # Must be a multiple of 2
-        self.optimize_params = [{'params': self.decoder.parameters(), 'lr': 1e-2},
-                                {'params': self.sdf_priors, 'lr': 1e-2},
-                                {'params': self.vector_features, 'lr': 1e-2}]
+        lr = mapper_specs["lr"]
+        self.optimize_params = [{'params': self.decoder.parameters(), 'lr': lr},
+                                {'params': self.sdf_priors, 'lr': lr},
+                                {'params': self.vector_features, 'lr': lr}]
 
         self.optim = torch.optim.Adam(self.optimize_params)
         self.scaler = torch.amp.GradScaler('cuda')
 
         self.frame_poses = []
         self.bound = args.decoder_specs["bound"]
+        self.frame_backward_cnt = []
 
 
     def mapping_step(self, frame_id, tracked_frame, epoch):
@@ -148,6 +147,8 @@ class Mapping:
             self.mapping_step(frame_id, tracked_frame, epoch)
             epoch += 1
 
+        np.savetxt(os.path.join(self.logger.misc_dir, "frame_backward_cnt.txt"), self.frame_backward_cnt)
+
         print("******* mapping process died *******")
         print(f"********** post-processing {self.final_iter} steps **********")
         self.num_iterations = 1
@@ -195,25 +196,29 @@ class Mapping:
     def do_mapping(self, tracked_frame=None, epoch=0):
         self.decoder.train()
         optimize_targets = self.select_optimize_targets(tracked_frame)
-        num_iterations = max(self.num_iterations, self.init_num_iterations - epoch)
-        bundle_adjust_frames(
+        if epoch < self.num_init_frames:
+            num_iterations = self.init_num_iterations
+        else:
+            num_iterations = self.num_iterations
+        # num_iterations = self.num_iterations
+
+        self.global_step, backward_cnt = bundle_adjust_frames(
             optimize_targets,
             self.map_states,
             self.decoder,
             self.loss_criteria,
             self.voxel_size,
             self.n_rays,
-            num_iterations,
-            self.bound,
+            num_iterations=num_iterations,
             optim=self.optim,
-            scaler=self.scaler,
-            frame_id=tracked_frame.stamp,
-            use_adaptive_ending=self.use_adaptive_ending,
             writer=self.writer,
+            global_step=self.global_step,
             h1=self.h1,
+            sample_specs=self.sample_specs,
             epoch=epoch,
-            sample_specs=self.sample_specs
+            frame_id=tracked_frame.stamp if tracked_frame is not None else 0
         )
+        self.frame_backward_cnt.append(backward_cnt)
 
     def select_optimize_targets(self, tracked_frame=None):
         targets = []
