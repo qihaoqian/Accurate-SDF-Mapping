@@ -3,25 +3,22 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import glob
+
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CppExtension
-import glob
 
 _ext_sources = glob.glob("src/*.cpp")
 
 setup(
-    name='svo',
+    name="sparse_octree",
     ext_modules=[
         CppExtension(
-            name='svo',
+            name="sparse_octree.svo",
             sources=_ext_sources,
-            include_dirs=["./include"],
-            extra_compile_args={
-                "cxx": ["-g", "-O0", "-I./include", "-DDEBUG"]  # Add debug symbols, disable optimization
-            },
+            extra_compile_args={"cxx": ["-g", "-O2", "-DNDEBUG"]},
         )
     ],
-    cmdclass={
-        'build_ext': BuildExtension
-    }
+    packages=["sparse_octree"],
+    cmdclass={"build_ext": BuildExtension},
 )

@@ -1,0 +1,85 @@
+identifier: __main__.TrainerConfig
+seed: 12345
+log_dir: logs
+exp_name: ego_sdf
+device: cuda
+data:
+    identifier: __main__.DataConfig
+    dataset_name: replica
+    dataset_args:
+        data_path: ""
+        use_gt: true
+        max_depth: -1.0
+    start_frame: 0
+    end_frame: -1
+    offset:
+        - 2.0
+        - 2.0
+        - 2.0
+key_frame_set:
+    identifier: ego_sdf.key_frame_set.KeyFrameSetConfig
+    insert_method: intersection
+    insert_interval: 50
+    insert_ratio: 0.85
+    frame_selection: multiple_max_set_coverage
+    selection_window_size: 8
+    frame_weight: uniform
+model:
+    identifier: ego_sdf.model.SdfNetworkConfig
+    octree_cfg:
+        identifier: octree_config.OctreeConfig
+        resolution: 0.1
+        tree_depth: 8
+        full_depth: 5
+        init_voxel_num: 200000
+    residual_net_cfg:
+        identifier: ego_sdf.residual_net.ResidualNetConfig
+        bound:
+        resolution: 0.05
+        num_levels: 4
+        feature_dims: 2
+        log2_T: 19
+        per_level_scale: 2.0
+        mlp_activation: ReLU
+        hidden_dims: 64
+        n_hidden_layers: 2
+        scale_with_bound: true
+        output_sdf_scale: 0.1
+criterion:
+    identifier: ego_sdf.criterion.CriterionConfig
+    boundary_loss_weight: 1000
+    boundary_loss_type: L1
+    perturbation_loss_weight: 200
+    perturbation_loss_type: L1
+    eikonal_loss_surface_weight: 3
+    eikonal_loss_space_weight: 10
+    eikonal_loss_type: L1
+    projection_loss_weight: 100
+    projection_loss_type: L1
+    heat_loss_weight: 0.0
+    heat_loss_lambda: 4.0
+    sign_loss_free_weight: 0.0
+    sign_loss_occ_weight: 0.0
+    sign_loss_temperature: 100.0
+num_iterations_per_frame: 10
+first_frame_iterations: 10
+num_rays_per_iteration: 2048
+early_stopping: true
+early_stopping_patience: 2
+sample_rays:
+    identifier: ego_sdf.utils.sampling.SampleRaysConfig
+    n_stratified: 1
+    n_perturbed: 2
+    depth_min: 0.07
+    depth_max: 10.0
+    surface_margin: 0.08
+    sigma_s: 0.04
+batch_size: 2048000
+lr: 0.01
+grad_method: finite_difference
+finite_difference_eps: 0.03
+final_iterations: 0
+save_mesh: true
+mesh_resolution: 0.02
+mesh_iso_value: 0.0
+clean_mesh: true

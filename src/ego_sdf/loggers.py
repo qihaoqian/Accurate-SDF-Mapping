@@ -1,3 +1,4 @@
+import logging
 import os
 import os.path as osp
 import pickle
@@ -10,15 +11,18 @@ import open3d as o3d
 import torch
 import yaml
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from torch.utils.tensorboard import SummaryWriter
+
+logging.basicConfig(level=logging.INFO)
 
 
 class BasicLogger:
-    def __init__(self, args, for_eva=False) -> None:
-        self.args = args
+    def __init__(self, log_dir: str, exp_name: str, config_dict: dict, for_eva: bool = False) -> None:
+        self.logger = logging.getLogger(exp_name)
         self.log_dir = osp.join(
-            # args.log_dir, args.exp_name, self.get_random_time_str())
-            args.log_dir,
-            args.exp_name,
+            log_dir,
+            exp_name,
+            self.get_random_time_str(),
         )
         self.img_dir = osp.join(
             self.log_dir,
@@ -29,6 +33,7 @@ class BasicLogger:
         self.backup_dir = osp.join(self.log_dir, "bak")
         self.misc_dir = osp.join(self.log_dir, "misc")
         self.for_eva = for_eva
+        self.tb = None
         if not for_eva:
             os.makedirs(self.img_dir, exist_ok=True)
             os.makedirs(self.ckpt_dir, exist_ok=True)
@@ -36,23 +41,18 @@ class BasicLogger:
             os.makedirs(self.misc_dir, exist_ok=True)
             os.makedirs(self.backup_dir, exist_ok=True)
 
-            self.log_config(args)
+            self.log_config(config_dict)
+            self.tb = SummaryWriter(self.log_dir)
 
     def get_random_time_str(self):
         return datetime.strftime(datetime.now(), "%Y-%m-%d-%H-%M-%S")
 
-    def log_ckpt(self, mapper, name):
-        decoder_state = {f: v.cpu() for f, v in mapper.decoder.state_dict().items()}
-        map_state = {f: v.cpu() for f, v in mapper.map_states.items()}
-        sdf_priors = mapper.sdf_priors.cpu()
-        torch.save(
-            {"decoder_state": decoder_state, "map_state": map_state, "sdf_priors": sdf_priors},
-            os.path.join(self.ckpt_dir, name),
-        )
+    def log_ckpt(self, state_dict: dict, name: str):
+        torch.save(state_dict, os.path.join(self.ckpt_dir, name))
 
-    def log_config(self, config):
+    def log_config(self, config_dict: dict):
         out_path = osp.join(self.backup_dir, "config.yaml")
-        yaml.dump(vars(config), open(out_path, "w"))
+        yaml.dump(config_dict, open(out_path, "w"))
 
     def log_mesh(self, mesh, name="final_mesh.ply"):
         out_path = osp.join(self.mesh_dir, name)
@@ -163,3 +163,6 @@ class BasicLogger:
         plt.savefig(osp.join(self.img_dir, "{:05d}.jpg".format(ind)), bbox_inches="tight", pad_inches=0.2)
         plt.clf()
         plt.close()
+
+    def info(self, msg: str):
+        self.logger.info(msg)
