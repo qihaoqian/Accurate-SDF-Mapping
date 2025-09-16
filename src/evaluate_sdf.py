@@ -309,6 +309,7 @@ def get_sdf_gradient_metrics(args, mapper, gt_mesh, points_for_grad, save_name=N
         points_eval_grad = torch.tensor(points_for_grad, dtype=torch.float32, device='cuda', requires_grad=True) + args.mapper_specs['offset']
         batch_size = 500000
         grad_pred = []
+        prior_grad_pred = []
         for i in range(0, points_eval_grad.shape[0], batch_size):
             batch_points = points_eval_grad[i:i+batch_size]
             batch_points.requires_grad_(True)
@@ -323,10 +324,19 @@ def get_sdf_gradient_metrics(args, mapper, gt_mesh, points_for_grad, save_name=N
                 inputs=batch_points,
                 grad_outputs=grad_outputs,
                 create_graph=False,
+                retain_graph=True,
+                only_inputs=True
+            )[0]
+            prior_grad = torch.autograd.grad(
+                outputs=sdf_priors_features,
+                inputs=batch_points,
+                grad_outputs=grad_outputs,
+                create_graph=False,
                 retain_graph=False,
                 only_inputs=True
             )[0]
             grad_pred.append(batch_grad.detach().cpu().numpy())
+            prior_grad_pred.append(prior_grad.detach().cpu().numpy())
             del batch_points_voxel_idx, batch_sdf_priors, batch_hash_features, batch_sdf_pred, batch_grad
             torch.cuda.empty_cache()
         
@@ -334,6 +344,7 @@ def get_sdf_gradient_metrics(args, mapper, gt_mesh, points_for_grad, save_name=N
         mapper.decoder.eval()
         
     grad_pred = np.concatenate(grad_pred, axis=0)
+    prior_grad_pred = np.concatenate(prior_grad_pred, axis=0)
     gt_grad_path = os.path.join(args.data_specs['data_path'], "sdf_info", f"grad_gt_{save_name}.npy")
     if not os.path.exists(gt_grad_path):
         grad_gt_normalized = calculate_gt_gradients(points_for_grad, gt_mesh, h1=0.01, args=args, save_path=gt_grad_path)
@@ -344,7 +355,12 @@ def get_sdf_gradient_metrics(args, mapper, gt_mesh, points_for_grad, save_name=N
     cosine = np.clip(cosine, -1, 1)
     angle = np.arccos(cosine)
     grad_angle_diff = np.abs(angle).mean()
-    return grad_angle_diff
+    prior_grad_pred_normalized = prior_grad_pred / (np.linalg.norm(prior_grad_pred, axis=1, keepdims=True)+1e-8)
+    cosine_prior = np.sum(prior_grad_pred_normalized * grad_gt_normalized, axis=1)
+    cosine_prior = np.clip(cosine_prior, -1, 1)
+    prior_angle = np.arccos(cosine_prior)
+    prior_grad_angle_diff = np.abs(prior_angle).mean()
+    return grad_angle_diff, prior_grad_angle_diff
 
 
 def evaluate_sdf(args):
@@ -364,13 +380,16 @@ def evaluate_sdf(args):
         print(f"  {key}: {value:.6f}")
         all_metrics[key] = value
 
-    grad_angle_diff = get_sdf_gradient_metrics(args, mapper, gt_mesh, points_for_eval, save_name="all")
-    grad_angle_diff_near_surface = get_sdf_gradient_metrics(args, mapper, gt_mesh, points_near_surface, save_name="near_surface")
-    grad_angle_diff_far_surface = get_sdf_gradient_metrics(args, mapper, gt_mesh, points_far_surface, save_name="far_surface")
+    grad_angle_diff, prior_grad_angle_diff = get_sdf_gradient_metrics(args, mapper, gt_mesh, points_for_eval, save_name="all")
+    grad_angle_diff_near_surface, prior_grad_angle_diff_near_surface = get_sdf_gradient_metrics(args, mapper, gt_mesh, points_near_surface, save_name="near_surface")
+    grad_angle_diff_far_surface, prior_grad_angle_diff_far_surface = get_sdf_gradient_metrics(args, mapper, gt_mesh, points_far_surface, save_name="far_surface")
     print(f"SDF gradient angle diff: {grad_angle_diff}", f"SDF gradient angle diff near surface: {grad_angle_diff_near_surface}", f"SDF gradient angle diff far surface: {grad_angle_diff_far_surface}")
     all_metrics['sdf_gradient_angle_diff'] = grad_angle_diff
+    all_metrics['prior_sdf_gradient_angle_diff'] = prior_grad_angle_diff
     all_metrics['sdf_gradient_angle_diff_near_surface'] = grad_angle_diff_near_surface
+    all_metrics['prior_sdf_gradient_angle_diff_near_surface'] = prior_grad_angle_diff_near_surface
     all_metrics['sdf_gradient_angle_diff_far_surface'] = grad_angle_diff_far_surface
+    all_metrics['prior_sdf_gradient_angle_diff_far_surface'] = prior_grad_angle_diff_far_surface
     
     # 保存所有metrics到txt文件
     results_dir = os.path.join(args.log_dir, args.exp_name, "results")
@@ -403,6 +422,9 @@ def evaluate_sdf(args):
         f.write(f"SDF Gradient Angle Diff: {all_metrics['sdf_gradient_angle_diff']:.3f}\n")
         f.write(f"SDF Gradient Angle Diff Near Surface: {all_metrics['sdf_gradient_angle_diff_near_surface']:.3f}\n")
         f.write(f"SDF Gradient Angle Diff Far Surface: {all_metrics['sdf_gradient_angle_diff_far_surface']:.3f}\n")
+        f.write(f"Prior SDF Gradient Angle Diff: {all_metrics['prior_sdf_gradient_angle_diff']:.3f}\n")
+        f.write(f"Prior SDF Gradient Angle Diff Near Surface: {all_metrics['prior_sdf_gradient_angle_diff_near_surface']:.3f}\n")
+        f.write(f"Prior SDF Gradient Angle Diff Far Surface: {all_metrics['prior_sdf_gradient_angle_diff_far_surface']:.3f}\n")
         
         f.write(f"SDF MSE: {all_metrics['sdf_mse']:.4f}\n")
         f.write(f"Prior SDF MSE: {all_metrics['prior_sdf_mse']:.4f}\n")

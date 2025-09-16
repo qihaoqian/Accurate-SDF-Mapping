@@ -7,12 +7,12 @@ def merge_csv_files():
     """合并logs/metric目录中的CSV文件"""
     
     # 定义目录路径
-    metric_dir = "logs/metric/baseline2.0"
+    metric_dir = "logs/metric/baseline2.0-voxel01"
     
     # 定义三种类型的文件模式
     file_patterns = {
         "mesh_metrics": "mesh_metrics_*.csv",
-        "mesh_metrics_priors": "mesh_metrics_priors_*.csv", 
+        # "mesh_metrics_priors": "mesh_metrics_priors_*.csv", 
         "evaluation_sdf_metrics": "evaluation_sdf_metrics_*.csv"
     }
     
@@ -99,7 +99,7 @@ def merge_csv_files():
         
         if all_dataframes:
             final_merged = pd.concat(all_dataframes, ignore_index=True)
-            final_output = "logs/metric/baseline2.0/merged_all_metrics.csv"
+            final_output = os.path.join(metric_dir, "merged_all_metrics.csv")
             final_merged.to_csv(final_output, index=False)
             print(f"已保存总体合并文件: {final_output}")
             print(f"总体数据形状: {final_merged.shape}")
