@@ -70,6 +70,7 @@ class Mapping:
         self.num_vertexes = mapper_specs["num_vertexes"]
         self.full_depth = mapper_specs["full_depth"]
         self.max_distance = data_specs["max_depth"]
+        self.gradient_augmentation = mapper_specs.get("gradient_augmentation", True)
 
         self.sdf_priors = torch.zeros(
             (self.num_vertexes, 1),
@@ -77,15 +78,16 @@ class Mapping:
             device=torch.device("cuda"))
         self.vector_features = torch.zeros(
             (self.num_vertexes, 3),
-            requires_grad=True, dtype=torch.float32,
+            requires_grad=self.gradient_augmentation, dtype=torch.float32,
             device=torch.device("cuda"))
 
         self.svo = torch.classes.svo.Octree()
         self.svo.init(256, int(self.num_vertexes), self.voxel_size, self.full_depth)  # Must be a multiple of 2
         lr = mapper_specs["lr"]
         self.optimize_params = [{'params': self.decoder.parameters(), 'lr': lr},
-                                {'params': self.sdf_priors, 'lr': lr},
-                                {'params': self.vector_features, 'lr': lr}]
+                                {'params': self.sdf_priors, 'lr': lr}]
+        if self.gradient_augmentation:
+            self.optimize_params.append({'params': self.vector_features, 'lr': lr})
 
         self.optim = torch.optim.Adam(self.optimize_params)
         self.scaler = torch.amp.GradScaler('cuda')
