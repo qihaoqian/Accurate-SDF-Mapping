@@ -1,0 +1,17 @@
+# Scene: office3
+# bound_min: [-4.041709899902344, -2.506286382675171, -1.5437352657318115]
+# bound_max: [4.040058135986328, 2.4763071537017822, 1.4039230346679688]
+
+base_config: trainer.yaml
+exp_name: replica_office3
+data:
+    dataset_args:
+        data_path: "/home/daizhirui/DataArchive/Replica-SDF-aug/office3"
+        max_depth: 10.0
+        offset: [4.5, 3.0, 2.0]
+        bound_min: [0.5, 0.5, 0.5]
+        bound_max: [8.5, 5.5, 4.0]
+model:
+    residual_net_cfg:
+        bound_min: [0.0, 0.0, 0.0]
+        bound_max: [9.0, 6.0, 4.5]
