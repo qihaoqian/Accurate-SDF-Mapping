@@ -55,7 +55,7 @@ mapper_specs:
   kf_selection_method: "multiple_max_set_coverage" # "random” or “multiple_max_set_coverage”
   insert_method: "intersection" # "naive" or "intersection"
   insert_ratio: 0.85
-  offset: 4.02 # used to make make the coordinate of each point positive
+  offset: 4.02 # used to make the coordinate of each point positive
 
 debug_args:
   verbose: false
@@ -63,6 +63,7 @@ debug_args:
 
 data_specs:
   data_path: './Datasets/Replica/room0'
+#  data_path: '/home/daizhirui/DataArchive/Replica/room0'
   max_depth: 10
   use_gt: True
 
