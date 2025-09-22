@@ -5,14 +5,14 @@ from typing import Callable, Dict, List
 import trimesh
 from scipy.spatial import cKDTree
 
-from grad_sdf import MarchingCubes, torch, o3d, np
+from grad_sdf import MarchingCubes, np, o3d, torch
 
 
 class EvaluaterBase:
 
     def __init__(
         self,
-        model_forward_func: Callable[[torch.nn.Module, torch.Tensor], Dict[str, torch.Tensor]],
+        model_forward_func: Callable[[torch.nn.Module, torch.Tensor, bool, bool, float], Dict[str, torch.Tensor]],
         model: torch.nn.Module | None = None,
         model_path: str | None = None,
         model_create_func: Callable[[str], torch.nn.Module] | None = None,
@@ -21,7 +21,8 @@ class EvaluaterBase:
         """
         Base class for evaluators.
         Args:
-            model_forward_func: function to forward the model, takes model and input tensor, returns a dict of output tensors
+            model_forward_func: function to forward the model, takes (model, input tensor, get_grad, auto_grad,
+                                finite_diff_eps), returns a dict of output tensors
             model: optional, if provided, use this model
             model_path: optional, if model is not provided, load the model from this path
             model_create_func: optional, function to create the model, takes model_path as input, returns the model
@@ -66,59 +67,35 @@ class EvaluaterBase:
         gt_sdf_values = np.load(os.path.join(test_set_dir, "gt_sdf_values.npy"))
         gt_sdf_grad = np.load(os.path.join(test_set_dir, "gt_sdf_grad.npy"))
 
-        grid_points = torch.from_numpy(grid_points).float().to(self.device)
+        grid_points = torch.from_numpy(grid_points).float()
         gt_sdf_values = torch.from_numpy(gt_sdf_values).float().to(self.device)
         gt_sdf_grad = torch.from_numpy(gt_sdf_grad).float().to(self.device)
 
         autograd = grad_method == "autograd"
-        grid_points.requires_grad_(autograd)
         self.model.eval()
-        with torch.set_grad_enabled(autograd):
-            sdf_pred = self.model_forward_func(self.model, grid_points)
-        if autograd:
-            sdf_grad = torch.autograd.grad(
-                outputs=[sdf_pred[k] for k in sdf_fields],
-                inputs=[grid_points],
-                grad_outputs=[torch.ones_like(sdf_pred[k]) for k in sdf_fields],
-                create_graph=True,
-                allow_unused=True,
-            )
-            sdf_grad = {k: g for k, g in zip(sdf_fields, sdf_grad)}
-        else:
-            sdf_grad = {k: torch.zeros_like(grid_points) for k in sdf_fields}
-            for i in range(3):
-                offset = torch.zeros((3,), device=grid_points.device)
-                offset[i] = eps
-                offset = offset.view(*[1] * (grid_points.ndim - 1), 3)
-                sdf_plus = self.model_forward_func(self.model, grid_points + offset)
-                sdf_minus = self.model_forward_func(self.model, grid_points - offset)
-                for k in sdf_fields:
-                    sdf_grad[k][..., i] = (sdf_plus[k] - sdf_minus[k]) / (2 * eps)
+        result = self.model_forward_func(self.model, grid_points, True, autograd, eps)
 
-        near_surface_mask = np.load(os.path.join(test_set_dir, "near_surface_mask.npy"))
-        far_away_mask = np.load(os.path.join(test_set_dir, "far_away_mask.npy"))
+        near_surface_mask = np.load(os.path.join(test_set_dir, "mask_near_surface.npy"))
+        far_away_mask = np.load(os.path.join(test_set_dir, "mask_far_surface.npy"))
         all_mask = near_surface_mask | far_away_mask
 
         sdf_metrics = dict(
             near_surface={
-                k: self._sdf_metrics(sdf_pred[k][near_surface_mask], gt_sdf_values[near_surface_mask])
-                for k in sdf_fields
+                k: self._sdf_metrics(result[k][near_surface_mask], gt_sdf_values[near_surface_mask]) for k in sdf_fields
             },
-            far_away={
-                k: self._sdf_metrics(sdf_pred[k][far_away_mask], gt_sdf_values[far_away_mask]) for k in sdf_fields
-            },
-            all={k: self._sdf_metrics(sdf_pred[k][all_mask], gt_sdf_values[all_mask]) for k in sdf_fields},
+            far_away={k: self._sdf_metrics(result[k][far_away_mask], gt_sdf_values[far_away_mask]) for k in sdf_fields},
+            all={k: self._sdf_metrics(result[k][all_mask], gt_sdf_values[all_mask]) for k in sdf_fields},
         )
 
         grad_metrics = dict(
             near_surface={
-                k: self._grad_metrics(sdf_grad[k][near_surface_mask], gt_sdf_grad[near_surface_mask])
+                k: self._grad_metrics(result["grad"][k][near_surface_mask], gt_sdf_grad[near_surface_mask])
                 for k in sdf_fields
             },
             far_away={
-                k: self._grad_metrics(sdf_grad[k][far_away_mask], gt_sdf_grad[far_away_mask]) for k in sdf_fields
+                k: self._grad_metrics(result["grad"][k][far_away_mask], gt_sdf_grad[far_away_mask]) for k in sdf_fields
             },
-            all={k: self._grad_metrics(sdf_grad[k][all_mask], gt_sdf_grad[all_mask]) for k in sdf_fields},
+            all={k: self._grad_metrics(result["grad"][k][all_mask], gt_sdf_grad[all_mask]) for k in sdf_fields},
         )
 
         return dict(sdf_metrics=sdf_metrics, grad_metrics=grad_metrics)
@@ -127,15 +104,18 @@ class EvaluaterBase:
     def mesh_metrics(
         pred_mesh_path: str,
         gt_mesh_path: str,
+        gt_mesh_offset: List[float] | None = None,
         threshold: float = 0.05,
         num_samples: int = 200_000,
         seed: int = 0,
     ):
         pred_mesh = trimesh.load_mesh(pred_mesh_path)
         gt_mesh = trimesh.load_mesh(gt_mesh_path)
+        if gt_mesh_offset is not None:
+            gt_mesh.apply_translation(gt_mesh_offset)
 
-        pred_pts = trimesh.sample.sample_surface(pred_mesh, num_samples, seed=seed)
-        gt_pts = trimesh.sample.sample_surface(gt_mesh, num_samples, seed=seed)
+        pred_pts = trimesh.sample.sample_surface(pred_mesh, num_samples, seed=seed)[0]
+        gt_pts = trimesh.sample.sample_surface(gt_mesh, num_samples, seed=seed)[0]
 
         pred_tree = cKDTree(pred_pts)
         gt_tree = cKDTree(gt_pts)
@@ -178,13 +158,31 @@ class EvaluaterBase:
         eps: float,
         pred_mesh_path: str,
         gt_mesh_path: str,
+        gt_mesh_offset: List[float] | None = None,
         threshold: float = 0.05,
         num_samples: int = 200_000,
         seed: int = 0,
     ):
-        metrics = self.sdf_and_grad_metrics(test_set_dir, sdf_fields, grad_method, eps)
-        metrics["mesh_metrics"] = self.mesh_metrics(pred_mesh_path, gt_mesh_path, threshold, num_samples, seed)
+        metrics: dict = self.sdf_and_grad_metrics(test_set_dir, sdf_fields, grad_method, eps)
+        metrics["mesh_metrics"] = self.mesh_metrics(
+            pred_mesh_path,
+            gt_mesh_path,
+            gt_mesh_offset,
+            threshold,
+            num_samples,
+            seed,
+        )
         return metrics
+
+    @torch.no_grad()
+    def extract_sdf_grid(self, bound_min: List[float], bound_max: List[float], grid_resolution: float):
+        x = torch.arange(bound_min[0], bound_max[0], grid_resolution)
+        y = torch.arange(bound_min[1], bound_max[1], grid_resolution)
+        z = torch.arange(bound_min[2], bound_max[2], grid_resolution)
+        grid_points = torch.stack(torch.meshgrid(x, y, z, indexing="ij"), dim=-1)
+        results = self.model_forward_func(self.model, grid_points.to(self.device), False, True, 0.0)
+        results["grid_bounds"] = torch.tensor([bound_min, bound_max])
+        return results
 
     @torch.no_grad()
     def extract_mesh(
@@ -213,25 +211,15 @@ class EvaluaterBase:
 
         self.model.eval()
 
-        x_size = int((bound_max[0] - bound_min[0]) / grid_resolution) + 1
-        y_size = int((bound_max[1] - bound_min[1]) / grid_resolution) + 1
-        z_size = int((bound_max[2] - bound_min[2]) / grid_resolution) + 1
-        grid_shape = [x_size, y_size, z_size]
-
-        x = torch.linspace(bound_min[0], bound_max[0], x_size)
-        y = torch.linspace(bound_min[1], bound_max[1], y_size)
-        z = torch.linspace(bound_min[2], bound_max[2], z_size)
-        grid_points = torch.stack(torch.meshgrid(x, y, z, indexing="ij"), dim=-1)
-
-        results = self.model_forward_func(self.model, grid_points.to(self.device))
+        sdf_grid = self.extract_sdf_grid(bound_min, bound_max, grid_resolution)
 
         meshes: List[o3d.geometry.TriangleMesh] = []
         for field in fields:
-            assert field in results, f"Field {field} not found in model output"
-            values = results[field].cpu().numpy().astype(np.float64)
+            assert field in sdf_grid, f"Field {field} not found in model output"
+            values = sdf_grid[field].cpu().numpy().astype(np.float64)
             mc = MarchingCubes()
             valid_voxels = mc.collect_valid_cubes(
-                grid_shape=grid_shape,
+                grid_shape=values.shape,
                 grid_values=values.flatten(),
                 iso_value=iso_value,
                 row_major=True,
@@ -243,17 +231,13 @@ class EvaluaterBase:
             if voxel_filter is not None and len(valid_voxels) > 0:
                 voxel_coords = torch.tensor(np.stack([voxel.coords for voxel in valid_voxels], axis=0))
                 voxel_coords = voxel_coords.long().to(self.device)
-                valid_voxels = [valid_voxels[i] for i in voxel_filter(voxel_coords, results["voxel_indices"])]
+                valid_voxels = [valid_voxels[i] for i in voxel_filter(voxel_coords, sdf_grid["voxel_indices"])]
 
             vertices, triangles, face_normals = mc.process_valid_cubes(
                 valid_cubes=[valid_voxels],
-                coords_min=[bound_min[0], bound_min[1], bound_min[2]],
-                grid_res=[
-                    (bound_max[0] - bound_min[0]) / x_size,
-                    (bound_max[1] - bound_min[1]) / y_size,
-                    (bound_max[2] - bound_min[2]) / z_size,
-                ],
-                grid_shape=grid_shape,
+                coords_min=bound_min,
+                grid_res=[grid_resolution, grid_resolution, grid_resolution],
+                grid_shape=values.shape,
                 grid_values=values.flatten(),
                 iso_value=iso_value,
                 row_major=True,
@@ -296,20 +280,20 @@ class EvaluaterBase:
             z = torch.arange(bound_min[2], bound_max[2], resolution)  # (nz,)
             yy, zz = torch.meshgrid(y, z, indexing="xy")
             grid_points = torch.stack((torch.full_like(yy, pos), yy, zz), dim=-1)
-            slice_bound = [bound_min[1], bound_max[1]], [bound_min[2], bound_max[2]]
+            slice_bound = [bound_min[1], bound_min[2]], [bound_max[1], bound_max[2]]
         elif axis == 1:
             x = torch.arange(bound_min[0], bound_max[0], resolution)  # (nx,)
             z = torch.arange(bound_min[2], bound_max[2], resolution)  # (nz,)
             xx, zz = torch.meshgrid(x, z, indexing="xy")
             grid_points = torch.stack((xx, torch.full_like(xx, pos), zz), dim=-1)
-            slice_bound = [bound_min[0], bound_max[0]], [bound_min[2], bound_max[2]]
+            slice_bound = [bound_min[0], bound_min[2]], [bound_max[0], bound_max[2]]
         else:  # axis == 2
             x = torch.arange(bound_min[0], bound_max[0], resolution)  # (nx,)
             y = torch.arange(bound_min[1], bound_max[1], resolution)  # (ny,)
             xx, yy = torch.meshgrid(x, y, indexing="xy")
             grid_points = torch.stack((xx, yy, torch.full_like(xx, pos)), dim=-1)
-            slice_bound = [bound_min[0], bound_max[0]], [bound_min[1], bound_max[1]]
+            slice_bound = [bound_min[0], bound_min[1]], [bound_max[0], bound_max[1]]
 
-        results = self.model_forward_func(self.model, grid_points.to(self.device))
+        results = self.model_forward_func(self.model, grid_points.to(self.device), False, True, 0.0)
         results["slice_bound"] = torch.tensor(slice_bound)
         return results

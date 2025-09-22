@@ -17,6 +17,7 @@ from grad_sdf.trainer_config import TrainerConfig
 from grad_sdf.utils.import_util import get_dataset
 from grad_sdf.utils.profiling import GpuTimer
 from grad_sdf.utils.sampling import SampleResults, generate_sdf_samples
+from grad_sdf.utils.dict_util import flatten_dict
 
 
 class Trainer:
@@ -52,9 +53,23 @@ class Trainer:
             n_perturbed=self.cfg.sample_rays.n_perturbed,
         )
 
-        self.key_frame_indices = []
+        self.selected_key_frame_indices = []
         self.samples: Optional[SampleResults] = None
         self.loss_dict = dict()
+
+        timer_on = self.cfg.profiling
+        self.timer_train_frame = GpuTimer("train with frame", enable=timer_on)
+        self.timer_select_key_frames = GpuTimer("select key frames", enable=timer_on)
+        self.timer_sample_rays = GpuTimer("sample rays", enable=timer_on)
+        self.timer_generate_sdf_samples = GpuTimer("generate sdf samples", enable=timer_on)
+        self.timer_compute_offset_points = GpuTimer("compute offset points", enable=timer_on)
+        self.timer_find_voxel_indices_offset_points = GpuTimer("find voxel indices for offset points", enable=timer_on)
+        self.timer_find_voxel_indices_sampled_xyz = GpuTimer("find voxel indices for sampled_xyz", enable=timer_on)
+        self.timer_training_iteration = GpuTimer("training iteration", enable=timer_on)
+
+        self.training_iteration_end_callback: callable[[Trainer], None] = None
+        self.training_frame_start_callback: callable[[Trainer, Frame], None] = None
+        self.training_end_callback: callable[[Trainer], None] = None
 
         self.evaluater = GradSdfEvaluator(
             batch_size=self.cfg.batch_size,
@@ -90,20 +105,22 @@ class Trainer:
             if is_key_frame:
                 self.logger.info(f"Frame {frame_id} is selected as a key frame.")
 
-            with GpuTimer(f"train with frame {frame_id}", enable=self.cfg.profiling):
+            with self.timer_train_frame:
                 self.train_with_frame(frame=frame)
             self.epoch += 1
 
             if self.cfg.ckpt_interval > 0 and self.epoch % self.cfg.ckpt_interval == 0:
-                self.logger.log_ckpt(self.model.state_dict(), f"epoch_{self.epoch:04d}.pth")
+                self.save_model(f"epoch_{self.epoch:04d}.pth")
 
         for _ in range(self.cfg.final_iterations):
             self.train_with_frame(None)
 
         self.logger.info("Training completed.")
+        if self.training_end_callback is not None:
+            self.training_end_callback(self)
 
         self.evaluate()
-        self.logger.log_ckpt(self.model.state_dict(), "final.pth")
+        self.save_model("final.pth")
 
     def fetch_one_frame(self) -> Optional[Frame]:
         frame = None
@@ -142,19 +159,22 @@ class Trainer:
         return self.key_frame_set.select_key_frames()
 
     def train_with_frame(self, frame: Frame | None):
+        if self.training_frame_start_callback is not None:
+            self.training_frame_start_callback(self, frame)
+
         self.model.train()
-        with GpuTimer("select key frames", enable=self.cfg.profiling):
-            self.key_frame_indices = self.key_frame_set.select_key_frames()
-        with GpuTimer("sample rays", enable=self.cfg.profiling):
+        with self.timer_select_key_frames:
+            self.selected_key_frame_indices = self.key_frame_set.select_key_frames()
+        with self.timer_sample_rays:
             rays_o_all, rays_d_all, depth_samples_all = self.key_frame_set.sample_rays(
                 num_samples=self.cfg.num_rays_total,
-                key_frame_indices=self.key_frame_indices,
+                key_frame_indices=self.selected_key_frame_indices,
                 current_frame=frame,
             )
             rays_o_all = rays_o_all.to(self.cfg.device)
             rays_d_all = rays_d_all.to(self.cfg.device)
             depth_samples_all = depth_samples_all.to(self.cfg.device)
-        with GpuTimer("generate sdf samples", enable=self.cfg.profiling):
+        with self.timer_generate_sdf_samples:
             self.samples = generate_sdf_samples(
                 rays_d_all=rays_d_all,
                 rays_o_all=rays_o_all,
@@ -168,22 +188,22 @@ class Trainer:
         if self.cfg.grad_method == "autodiff":
             self.samples.sampled_xyz.requires_grad_(True)
         else:
-            with GpuTimer("compute offset points for finite difference", enable=self.cfg.profiling):
+            with self.timer_compute_offset_points:
                 offset_points_plus, offset_points_minus = self.compute_offset_points_for_finite_diff(
                     self.samples.sampled_xyz
                 )
-            with GpuTimer("find voxel indices for offset points", enable=self.cfg.profiling):
+            with self.timer_find_voxel_indices_offset_points:
                 voxel_indices_plus = self.find_voxel_indices(offset_points_plus)  # (n, m, 3)
                 voxel_indices_minus = self.find_voxel_indices(offset_points_minus)  # (n, m, 3)
-        with GpuTimer("find voxel indices for sampled_xyz", enable=self.cfg.profiling):
+        with self.timer_find_voxel_indices_sampled_xyz:
             voxel_indices = self.find_voxel_indices(self.samples.sampled_xyz)  # (n, m)
 
         bs = int(self.cfg.batch_size / self.samples.sampled_xyz.shape[1])
         num_iterations = self.cfg.num_iterations_per_frame
         if self.epoch < self.cfg.num_init_frames:
             num_iterations = self.cfg.init_frame_iterations
-        with GpuTimer("training iteration", enable=self.cfg.profiling):
-            for _ in range(num_iterations):
+        for _ in range(num_iterations):
+            with self.timer_training_iteration:
                 self.optimizer.zero_grad()
                 sdf_pred_all = []
                 sdf_grad_all = []
@@ -223,9 +243,12 @@ class Trainer:
                 self.optimizer.step()
                 self.global_step += 1
 
-                self.logger.info(f"loss_dict: {self.loss_dict}")
-                for k, v in self.loss_dict.items():
-                    self.logger.tb.add_scalar(f"loss/{k}", v, self.global_step)
+            self.logger.info(f"loss_dict: {self.loss_dict}")
+            for k, v in self.loss_dict.items():
+                self.logger.tb.add_scalar(f"loss/{k}", v, self.global_step)
+
+            if self.training_iteration_end_callback is not None:
+                self.training_iteration_end_callback(self)
 
     @staticmethod
     def compute_sdf_grad_autodiff(points: torch.Tensor, pred_sdf: torch.Tensor):
@@ -300,6 +323,24 @@ class Trainer:
 
         return grad, offset_points_plus, offset_points_minus, voxel_indices_plus, voxel_indices_minus
 
+    @torch.no_grad()
+    def save_model(self, path: str):
+        self.logger.log_ckpt(self.model.state_dict(), path)
+        self.logger.info(f"Model saved to {path}.")
+
+    def get_time_stats(self) -> dict:
+        time_stats = {
+            "train_frame": self.timer_train_frame.average_t,
+            "select_key_frames": self.timer_select_key_frames.average_t,
+            "sample_rays": self.timer_sample_rays.average_t,
+            "generate_sdf_samples": self.timer_generate_sdf_samples.average_t,
+            "compute_offset_points": self.timer_compute_offset_points.average_t,
+            "find_voxel_indices_offset_points": self.timer_find_voxel_indices_offset_points.average_t,
+            "find_voxel_indices_sampled_xyz": self.timer_find_voxel_indices_sampled_xyz.average_t,
+            "training_iteration": self.timer_training_iteration.average_t,
+        }
+        return time_stats
+
     def evaluate(self, epoch_dir: Optional[str] = None):
         bound_min = self.cfg.model.residual_net_cfg.bound_min
         bound_max = self.cfg.model.residual_net_cfg.bound_max
@@ -354,14 +395,14 @@ class Trainer:
 
                 slice_config = slice_configs[axis]
                 axis_name = slice_config["axis_name"]
-                slice_bound = slice_result["slice_bound"].tolist()
+                slice_bound = slice_result["slice_bound"].tolist()  # (bound_min, bound_max) for the two axes
 
                 for slice_name in ["sdf_prior", "sdf_residual", "sdf"]:
                     slice_values = slice_result[slice_name].cpu().numpy()
                     plt.figure()
                     im = plt.imshow(
                         slice_values,
-                        extent=(slice_bound[0][0], slice_bound[0][1], slice_bound[1][0], slice_bound[1][1]),
+                        extent=(slice_bound[0][0], slice_bound[1][0], slice_bound[0][1], slice_bound[1][1]),
                         origin="lower",
                         cmap="jet",
                     )

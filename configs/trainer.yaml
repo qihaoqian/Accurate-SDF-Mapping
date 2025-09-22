@@ -1,10 +1,10 @@
-identifier: __main__.TrainerConfig
+identifier: grad_sdf.trainer_config.TrainerConfig
 seed: 12345
 log_dir: logs
 exp_name: grad_sdf
 device: cuda
 data:
-    identifier: __main__.DataConfig
+    identifier: grad_sdf.dataset.data_config.DataConfig
     dataset_name: replica
     dataset_args:
         data_path: ""

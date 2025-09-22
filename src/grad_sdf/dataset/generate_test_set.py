@@ -1,6 +1,8 @@
 import os
 
 import numpy as np
+from tqdm import tqdm
+
 from grad_sdf import MeshSdf, o3d
 import argparse
 
@@ -19,16 +21,19 @@ def compute_sdf_ground_truth(
     Returns:
 
     """
+    # compute SDF
+    tqdm.write("Computing ground truth SDF")
     f = MeshSdf(np.asarray(gt_mesh.vertices), np.asarray(gt_mesh.triangles))
     sdf = f(query_points.T)
 
     # compute gradient
+    tqdm.write("Computing ground truth SDF gradient")
     grad = np.zeros_like(query_points)
     for i in range(3):
         offset = np.zeros((3,))
         offset[i] = eps
-        a = f(query_points + offset)
-        b = f(query_points - offset)
+        a = f((query_points + offset).T)
+        b = f((query_points - offset).T)
         grad[:, i] = (a - b) / (2 * eps)
 
     # normalize gradient
@@ -70,8 +75,10 @@ def main():
     mesh = o3d.io.read_triangle_mesh(mesh_path)
     if bound_min is None:
         bound_min = mesh.get_min_bound()
+        bound_min -= args.near_surface_sdf_range[0] * 2
     if bound_max is None:
         bound_max = mesh.get_max_bound()
+        bound_max += args.near_surface_sdf_range[0] * 2
     if offset is None:
         offset = np.zeros((3,))
     bound_min -= offset
@@ -79,13 +86,12 @@ def main():
 
     os.makedirs(output_dir, exist_ok=True)
 
-    x_size = int((bound_max[0] - bound_min[0]) / grid_resolution) + 1
-    y_size = int((bound_max[1] - bound_min[1]) / grid_resolution) + 1
-    z_size = int((bound_max[2] - bound_min[2]) / grid_resolution) + 1
-
-    x = np.linspace(bound_min[0], bound_max[0], x_size)
-    y = np.linspace(bound_min[1], bound_max[1], y_size)
-    z = np.linspace(bound_min[2], bound_max[2], z_size)
+    x = np.arange(bound_min[0], bound_max[0], grid_resolution)
+    y = np.arange(bound_min[1], bound_max[1], grid_resolution)
+    z = np.arange(bound_min[2], bound_max[2], grid_resolution)
+    x_size = x.shape[0]
+    y_size = y.shape[0]
+    z_size = z.shape[0]
     grid_points = np.stack(np.meshgrid(x, y, z, indexing="ij"), axis=-1)
 
     gt_sdf_values, gt_sdf_grad = compute_sdf_ground_truth(mesh, grid_points.reshape(-1, 3), eps)

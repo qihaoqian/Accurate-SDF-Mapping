@@ -40,7 +40,9 @@ class BasicLogger:
         return datetime.strftime(datetime.now(), "%Y-%m-%d-%H-%M-%S")
 
     def log_ckpt(self, state_dict: dict, name: str):
-        torch.save(state_dict, os.path.join(self.ckpt_dir, name))
+        path = name if os.path.isabs(name) else os.path.join(self.ckpt_dir, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(state_dict, path)
 
     def log_config(self, config_dict: dict):
         out_path = os.path.join(self.backup_dir, "config.yaml")

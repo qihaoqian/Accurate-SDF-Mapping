@@ -181,5 +181,10 @@ class SemiSparseOctree(torch.nn.Module):
             vertex_grad=vertex_grad_priors,
             resolution=self.cfg.resolution,
             gradient_augmentation=self.cfg.gradient_augmentation,
+            little_endian=self.little_endian_vertex_order,
         )
         return sdf_preds, voxel_indices
+
+    @property
+    def little_endian_vertex_order(self):
+        return False  # e.g. 1 -> (0, 0, 1), a vertex on the z-axis
