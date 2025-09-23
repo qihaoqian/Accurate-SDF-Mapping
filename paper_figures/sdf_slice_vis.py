@@ -31,7 +31,7 @@ def get_points(bound, res, offset):
     y = torch.linspace(y_min, y_max, y_res)
     z = torch.linspace(z_min, z_max, z_res)
     x, y, z = torch.meshgrid(x, y, z, indexing="ij")
-    points = torch.stack([x.flatten(), y.flatten(), z.flatten()], axis=-1)
+    points = torch.stack([x.flatten(), y.flatten(), z.flatten()], dim=-1)
 
     return points, (x_res, y_res, z_res)
 

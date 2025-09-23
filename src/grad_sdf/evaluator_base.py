@@ -8,7 +8,7 @@ from scipy.spatial import cKDTree
 from grad_sdf import MarchingCubes, np, o3d, torch
 
 
-class EvaluaterBase:
+class EvaluatorBase:
 
     def __init__(
         self,
@@ -181,7 +181,7 @@ class EvaluaterBase:
         z = torch.arange(bound_min[2], bound_max[2], grid_resolution)
         grid_points = torch.stack(torch.meshgrid(x, y, z, indexing="ij"), dim=-1)
         results = self.model_forward_func(self.model, grid_points.to(self.device), False, True, 0.0)
-        results["grid_bounds"] = torch.tensor([bound_min, bound_max])
+        results["grid_bound"] = torch.tensor([bound_min, bound_max])
         return results
 
     @torch.no_grad()

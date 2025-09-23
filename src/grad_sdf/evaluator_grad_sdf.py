@@ -4,13 +4,13 @@ from typing import Callable, Dict
 import pandas as pd
 from tqdm import tqdm
 
-from grad_sdf import o3d
-from grad_sdf.evaluater_base import EvaluaterBase, torch
+from grad_sdf import o3d, torch
+from grad_sdf.evaluator_base import EvaluatorBase
 from grad_sdf.model import SdfNetwork, SdfNetworkConfig
 from grad_sdf.utils.dict_util import flatten_dict
 
 
-class GradSdfEvaluator(EvaluaterBase):
+class GradSdfEvaluator(EvaluatorBase):
     """
     Evaluator for GradSDF models.
     """
@@ -244,6 +244,8 @@ def main():
         batch_size=args.batch_size,
         model_cfg=trainer_cfg.model,
         model_path=args.model_path,
+        # add offset to the model input if specified in the dataset args
+        # the test data is not offset, so we need to offset the model input
         model_input_offset=trainer_cfg.data.dataset_args.get("offset", None),
         device=args.device,
     )

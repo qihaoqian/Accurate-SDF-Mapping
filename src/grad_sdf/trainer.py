@@ -1,6 +1,6 @@
 import os
 import random
-from typing import Optional
+from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from grad_sdf import torch
 from grad_sdf.criterion import Criterion
-from grad_sdf.evaluater_grad_sdf import GradSdfEvaluator
+from grad_sdf.evaluator_grad_sdf import GradSdfEvaluator
 from grad_sdf.frame import Frame
 from grad_sdf.key_frame_set import KeyFrameSet
 from grad_sdf.loggers import BasicLogger
@@ -17,7 +17,6 @@ from grad_sdf.trainer_config import TrainerConfig
 from grad_sdf.utils.import_util import get_dataset
 from grad_sdf.utils.profiling import GpuTimer
 from grad_sdf.utils.sampling import SampleResults, generate_sdf_samples
-from grad_sdf.utils.dict_util import flatten_dict
 
 
 class Trainer:
@@ -46,6 +45,7 @@ class Trainer:
         self.scene_offset = torch.tensor(self.cfg.data.offset)
         self.epoch = 0
         self.global_step = 0
+        self.num_iterations = 0
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
         self.criterion = Criterion(
             cfg=self.cfg.criterion,
@@ -67,15 +67,16 @@ class Trainer:
         self.timer_find_voxel_indices_sampled_xyz = GpuTimer("find voxel indices for sampled_xyz", enable=timer_on)
         self.timer_training_iteration = GpuTimer("training iteration", enable=timer_on)
 
-        self.training_iteration_end_callback: callable[[Trainer], None] = None
-        self.training_frame_start_callback: callable[[Trainer, Frame], None] = None
-        self.training_end_callback: callable[[Trainer], None] = None
+        self.training_iteration_end_callback: Callable[[Trainer], None] = None  # type: ignore
+        self.training_frame_start_callback: Callable[[Trainer, Frame], bool] = None  # type: ignore
+        self.training_end_callback: Callable[[Trainer], None] = None  # type: ignore
 
         self.evaluater = GradSdfEvaluator(
             batch_size=self.cfg.batch_size,
             clean_mesh=self.cfg.clean_mesh,
             model_cfg=self.cfg.model,
             model=self.model,
+            model_input_offset=None,
             device=self.cfg.device,
         )
 
@@ -106,7 +107,9 @@ class Trainer:
                 self.logger.info(f"Frame {frame_id} is selected as a key frame.")
 
             with self.timer_train_frame:
-                self.train_with_frame(frame=frame)
+                if not self.train_with_frame(frame=frame):
+                    self.logger.info("Training interrupted by callback, exiting.")
+                    break  # exit training
             self.epoch += 1
 
             if self.cfg.ckpt_interval > 0 and self.epoch % self.cfg.ckpt_interval == 0:
@@ -159,10 +162,14 @@ class Trainer:
         return self.key_frame_set.select_key_frames()
 
     def train_with_frame(self, frame: Frame | None):
-        if self.training_frame_start_callback is not None:
-            self.training_frame_start_callback(self, frame)
+        self.num_iterations = self.cfg.num_iterations_per_frame
+        if self.epoch < self.cfg.num_init_frames:
+            self.num_iterations = self.cfg.init_frame_iterations
 
-        self.model.train()
+        if self.training_frame_start_callback is not None:
+            if not self.training_frame_start_callback(self, frame):
+                return False  # exit training
+
         with self.timer_select_key_frames:
             self.selected_key_frame_indices = self.key_frame_set.select_key_frames()
         with self.timer_sample_rays:
@@ -199,48 +206,48 @@ class Trainer:
             voxel_indices = self.find_voxel_indices(self.samples.sampled_xyz)  # (n, m)
 
         bs = int(self.cfg.batch_size / self.samples.sampled_xyz.shape[1])
-        num_iterations = self.cfg.num_iterations_per_frame
-        if self.epoch < self.cfg.num_init_frames:
-            num_iterations = self.cfg.init_frame_iterations
-        for _ in range(num_iterations):
+
+        for _ in range(self.num_iterations):
+            self.model.train()
             with self.timer_training_iteration:
-                self.optimizer.zero_grad()
-                sdf_pred_all = []
-                sdf_grad_all = []
-                for i in range(0, num_rays, bs):
-                    j = min(i + bs, num_rays)
-                    points = self.samples.sampled_xyz[i:j]  # (b, m, 3)
-                    voxel_indices_batch = voxel_indices[i:j]
-                    _, sdf_prior, sdf_residual, sdf_pred = self.model(points, voxel_indices_batch)
-                    if self.cfg.grad_method == "autodiff":
-                        sdf_grad = self.compute_sdf_grad_autodiff(points, sdf_pred)
+                with torch.enable_grad():
+                    self.optimizer.zero_grad()
+                    sdf_pred_all = []
+                    sdf_grad_all = []
+                    for i in range(0, num_rays, bs):
+                        j = min(i + bs, num_rays)
+                        points = self.samples.sampled_xyz[i:j]  # (b, m, 3)
+                        voxel_indices_batch = voxel_indices[i:j]
+                        _, sdf_prior, sdf_residual, sdf_pred = self.model(points, voxel_indices_batch)
+                        if self.cfg.grad_method == "autodiff":
+                            sdf_grad = self.compute_sdf_grad_autodiff(points, sdf_pred)
+                        else:
+                            sdf_grad = self.compute_sdf_grad_finite_difference(
+                                points=points,
+                                offset_points_plus=offset_points_plus[i:j],
+                                offset_points_minus=offset_points_minus[i:j],
+                                voxel_indices_plus=voxel_indices_plus[i:j],
+                                voxel_indices_minus=voxel_indices_minus[i:j],
+                            )[0]
+
+                        sdf_pred_all.append(sdf_pred)  # (b, m)
+                        sdf_grad_all.append(sdf_grad)  # (b, m, 3)
+
+                    if len(sdf_pred_all) == 1:
+                        sdf_pred_all = sdf_pred_all[0]
+                        sdf_grad_all = sdf_grad_all[0]
                     else:
-                        sdf_grad = self.compute_sdf_grad_finite_difference(
-                            points=points,
-                            offset_points_plus=offset_points_plus[i:j],
-                            offset_points_minus=offset_points_minus[i:j],
-                            voxel_indices_plus=voxel_indices_plus[i:j],
-                            voxel_indices_minus=voxel_indices_minus[i:j],
-                        )[0]
+                        sdf_pred_all = torch.cat(sdf_pred_all, dim=0)
+                        sdf_grad_all = torch.cat(sdf_grad_all, dim=0)
 
-                    sdf_pred_all.append(sdf_pred)  # (b, m)
-                    sdf_grad_all.append(sdf_grad)  # (b, m, 3)
-
-                if len(sdf_pred_all) == 1:
-                    sdf_pred_all = sdf_pred_all[0]
-                    sdf_grad_all = sdf_grad_all[0]
-                else:
-                    sdf_pred_all = torch.cat(sdf_pred_all, dim=0)
-                    sdf_grad_all = torch.cat(sdf_grad_all, dim=0)
-
-                loss, self.loss_dict = self.criterion(
-                    pred_sdf=sdf_pred_all,
-                    pred_grad=sdf_grad_all,
-                    gt_sdf_perturb=self.samples.perturbation_sdf,
-                    gt_sdf_stratified=self.samples.stratified_sdf,
-                )
-                loss.backward()
-                self.optimizer.step()
+                    loss, self.loss_dict = self.criterion(
+                        pred_sdf=sdf_pred_all,
+                        pred_grad=sdf_grad_all,
+                        gt_sdf_perturb=self.samples.perturbation_sdf,
+                        gt_sdf_stratified=self.samples.stratified_sdf,
+                    )
+                    loss.backward()
+                    self.optimizer.step()
                 self.global_step += 1
 
             self.logger.info(f"loss_dict: {self.loss_dict}")
@@ -249,6 +256,7 @@ class Trainer:
 
             if self.training_iteration_end_callback is not None:
                 self.training_iteration_end_callback(self)
+        return True
 
     @staticmethod
     def compute_sdf_grad_autodiff(points: torch.Tensor, pred_sdf: torch.Tensor):

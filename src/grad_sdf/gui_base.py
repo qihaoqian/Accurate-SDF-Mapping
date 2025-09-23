@@ -1,53 +1,71 @@
-import asyncio
+import multiprocessing as mp
 import os
+import queue
 import threading
 import time
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from multiprocessing import Queue
 from typing import Optional
 
 import cv2
 import matplotlib.pyplot as plt
+import yaml
 from matplotlib import cm
 from tqdm import tqdm
 
 from grad_sdf import MarchingCubes, np, o3d, o3d_gui, o3d_rendering
 from grad_sdf.utils.config_abc import ConfigABC
+from grad_sdf.utils.dict_util import flatten_dict
+from grad_sdf.utils.profiling import CpuTimer
 
 
 @dataclass
 class GuiBaseConfig(ConfigABC):
     panel_split_ratio: float = 0.7
 
-    scan_point_size: int = 2
-    scan_point_color: list = [0.9, 0.9, 0.9]
+    view_option: str = "follow"  # follow, keyboard, from_file
+    view_file: Optional[str] = None
+    objects: list = field(default_factory=lambda: ["scan", "traj", "current_camera", "sdf_slice"])
 
-    sdf_point_size: int = 2
-    sdf_color_map: str = "jet"  # jet, bwr, viridis
+    scan_point_size: int = 2
+    scan_point_downsample: int = 2
+    scan_point_color: list = field(default_factory=lambda: [0.9, 0.9, 0.9])
 
     traj_line_width: int = 2
-    traj_color: list = [1.0, 0.0, 0.0]
+    traj_color: list = field(default_factory=lambda: [1.0, 0.0, 0.0])
 
     camera_line_width: int = 3
     camera_size: float = 1.0
-    camera_color_current: list = [0.0, 1.0, 0.0]
-    camera_color_key_frame: list = [0.0, 0.0, 1.0]
-    camera_color_selected_key_frame: list = [1.0, 0.5, 0.0]
+    camera_color_current: list = field(default_factory=lambda: [0.0, 1.0, 0.0])
+    camera_color_key_frame: list = field(default_factory=lambda: [0.0, 0.0, 1.0])
+    camera_color_selected_key_frame: list = field(default_factory=lambda: [1.0, 0.5, 0.0])
 
-    octree_line_width: int = 1
-    octree_color: list = [0.8, 0.8, 0.8]
+    octree_line_width: int = 3
+    octree_update_freq: int = 20
+    octree_min_size: int = 1
+    octree_color: list = field(default_factory=lambda: [0.8, 0.8, 0.8])
 
     mesh_update_freq: int = 10
     mesh_resolution: int = 100
     mesh_height_color_map: str = "jet"
+    mesh_color_option: str = "normal"  # normal, height
 
     sdf_slice_update_freq: int = 10
     sdf_slice_resolution: int = 100
+    sdf_point_size: int = 20
+    sdf_slice_axis: int = 2
+    sdf_slice_position: float = 0.0
+    sdf_color_map: str = "jet"  # jet, bwr, viridis
 
     experiment_name: str = "grad_sdf"
-    scene_bound_min: list = [-5.0, -5.0, -5.0]
-    scene_bound_max: list = [5.0, 5.0, 5.0]
+    scene_bound_min: Optional[list] = None
+    scene_bound_max: Optional[list] = None
     gt_mesh_path: Optional[str] = None
+    gt_mesh_offset: Optional[list] = None
+
+    mesh_remove_ceiling: bool = True
+    mesh_ceiling_thickness: float = 0.2
 
 
 @dataclass
@@ -59,13 +77,16 @@ class GuiControlPacket:
     flag_mapping_run: bool = True
     flag_gui_closed: bool = False
 
+    octree_update_frequency: int = -1  # if > 0, update octree every N frames
+    octree_min_size: int = 1  # if > 0, set the min size of the octree
+
     sdf_slice_frequency: int = -1
     sdf_slice_axis: int = 2
     sdf_slice_position: float = 0.0
-    sdf_slice_resolution: int = -1
+    sdf_slice_resolution: float = -1
 
     sdf_grid_frequency: int = -1
-    sdf_grid_resolution: int = -1
+    sdf_grid_resolution: float = -1
 
     save_model_to_path: Optional[str] = None  # if not None, save the model to this path
 
@@ -79,6 +100,8 @@ class GuiDataPacket:
     flag_exit: bool = False  # whether the mapping process is going to exit
     mapping_end: bool = False  # whether the mapping has ended
 
+    num_iterations: int = -1  # number of iterations used for the current frame
+
     frame_idx: int = -1  # current frame index
     frame_pose: Optional[np.ndarray] = None  # used to build trajectory
     scan_points: Optional[np.ndarray] = None  # (N, 3) point cloud of the scan
@@ -90,6 +113,7 @@ class GuiDataPacket:
     octree_voxel_sizes: Optional[np.ndarray] = None  # (M, 1) array of voxel sizes
     octree_vertices: Optional[np.ndarray] = None  # (N, 3) array of voxel corner indices
     octree_little_endian_vertex_order: bool = False
+    octree_resolution: Optional[float] = None  # voxel size in meters
 
     sdf_slice_bounds: Optional[list] = None  # (bound_min, bound_max)
     sdf_slice_axis: Optional[int] = None  # 0, 1, or 2
@@ -104,56 +128,263 @@ class GuiDataPacket:
     model_saved_path: Optional[str] = None  # path where the model is saved
 
     time_stats: Optional[dict] = None  # time statistics
-
     loss_stats: Optional[dict] = None  # loss statistics
+    gpu_mem_usage: Optional[float] = None  # GPU memory usage in GB
+
+
+@dataclass
+class MarchingCubesTask:
+    name: str
+    coords_min: list
+    grid_res: list
+    grid_values: np.ndarray
+
+
+@dataclass
+class MarchingCubesResult:
+    name: str
+    vertices: np.ndarray
+    triangles: np.ndarray
+    triangle_normals: np.ndarray
+
+
+def marching_cubes_process(queue_in: Queue, queue_out: Queue):
+    tqdm.write("[Marching Cubes] Marching cubes process started.")
+    mc = MarchingCubes()
+    while True:
+        task: MarchingCubesTask = queue_in.get()
+        if task is None:
+            break
+        vertices, triangles, triangle_normals = mc.run(
+            coords_min=task.coords_min,
+            grid_res=task.grid_res,
+            grid_shape=task.grid_values.shape,
+            grid_values=task.grid_values.flatten(),
+            iso_value=0.0,
+            row_major=True,
+            parallel=True,
+        )
+        result = MarchingCubesResult(
+            name=task.name,
+            vertices=np.array(vertices).astype(np.float64),
+            triangles=np.array(triangles).astype(np.int32),
+            triangle_normals=np.array(triangle_normals).astype(np.float64),
+        )
+        queue_out.put_nowait(result)
+    tqdm.write("[Marching Cubes] Exiting marching cubes process.")
+
+
+def octree_lineset_from_voxels(
+    vertex_offsets,
+    octree_voxel_lines,
+    voxel_vertices,
+    voxel_centers,
+    voxel_sizes,
+    resolution,
+    scene_bound_min=None,
+    scene_bound_max=None,
+):
+    n_vertices = np.max(voxel_vertices) + 1
+    vertices = voxel_centers.reshape(-1, 1, 3) + voxel_sizes.reshape(-1, 1, 1) * vertex_offsets
+    vertices_unique = np.zeros((n_vertices, 3), dtype=np.float64)
+    vertices_unique[voxel_vertices.flatten()] = vertices.reshape(-1, 3)
+    lines = voxel_vertices[:, octree_voxel_lines].reshape(-1, 2)  # (N, 12, 2) -> (N*12, 2)
+
+    # remove duplicate lines
+    lines = np.sort(lines, axis=1)  # (N*12, 2)
+    lines = np.unique(lines, axis=0)  # (M, 2), M <= N*12
+
+    # remove lines outside the bounding box
+    if scene_bound_min is not None and scene_bound_max is not None:
+        mask = np.all(  # (M, 2, 3)
+            (vertices_unique[lines] >= scene_bound_min) & (vertices_unique[lines] <= scene_bound_max),
+            axis=(1, 2),
+        )
+        lines = lines[mask].copy()
+
+    # keep only vertices that are used by the remaining lines
+    unique_vertex_indices = np.unique(lines)
+    index_mapping = -np.ones(n_vertices, dtype=np.int32)
+    index_mapping[unique_vertex_indices] = np.arange(len(unique_vertex_indices), dtype=np.int32)
+    lines = index_mapping[lines]  # (M, 2)
+    vertices_unique = vertices_unique[unique_vertex_indices]
+
+    # remove short lines overlapped by longer lines
+    line_vertices = np.round(vertices_unique[lines] / resolution).astype(np.int64)  # (M, 2, 3), in voxel coordinates
+    line_axes = np.argmax(np.abs(line_vertices[:, 1] - line_vertices[:, 0]), axis=1)  # (M,)
+
+    kept_lines = []
+
+    for axis in range(3):
+        axis_mask = line_axes == axis
+        lines_axis = lines[axis_mask]
+        if len(lines_axis) == 0:
+            continue
+        line_vertices_axis = line_vertices[axis_mask]  # (M', 2, 3)
+        flip = line_vertices_axis[:, 0, axis] > line_vertices_axis[:, 1, axis]
+        line_vertices_axis[flip] = line_vertices_axis[flip][:, ::-1, :]
+        line_coords = np.concatenate(  # (M', 4)
+            [
+                line_vertices_axis[:, 1],  # end point
+                line_vertices_axis[:, [0], axis] - line_vertices_axis[:, [1], axis],  # negative length
+            ],
+            axis=1,
+        )
+
+        order = np.lexsort(line_coords.T[::-1])  # sort by (end_x, end_y, end_z, -length)
+        line_coords = line_coords[order]
+        lines_axis = lines_axis[order]
+
+        _, unique_indices = np.unique(line_coords[:, :3], axis=0, return_index=True)
+        lines_axis = lines_axis[unique_indices]
+        kept_lines.append(lines_axis)
+
+    if len(kept_lines) > 0:
+        lines = np.concatenate(kept_lines, axis=0)
+    else:
+        return None, None
+
+    return vertices_unique, lines
+
+
+@dataclass
+class OctreeLinesetTask:
+    voxel_centers: np.ndarray
+    voxel_sizes: np.ndarray
+    voxel_vertices: np.ndarray
+    octree_resolution: float
+    little_endian_vertex_order: bool
+    scene_bound_min: Optional[list] = None
+    scene_bound_max: Optional[list] = None
+
+
+@dataclass
+class OctreeLinesetResult:
+    vertices: np.ndarray
+    lines: np.ndarray
+
+
+def octree_lineset_process(queue_in: Queue, queue_out: Queue):
+    cut = np.array([-0.5, 0.5], dtype=np.float32)
+    xx, yy, zz = np.meshgrid(cut, cut, cut, indexing="ij")  # big-endian
+    octree_vertex_offsets = np.stack([xx, yy, zz], axis=-1).reshape(1, 8, 3)  # (1,8,3)
+    octree_vertex_offsets = [
+        octree_vertex_offsets,  # big-endian
+        octree_vertex_offsets[:, :, ::-1].copy(),  # little-endian
+    ]
+
+    octree_voxel_lines = np.array(
+        [
+            [0, 1],
+            [1, 3],
+            [3, 2],
+            [2, 0],
+            [0, 4],
+            [4, 5],
+            [5, 7],
+            [7, 6],
+            [6, 4],
+            [1, 5],
+            [2, 6],
+            [3, 7],
+        ],
+        dtype=np.int32,
+    )
+
+    tqdm.write("[Octree Lineset] Octree lineset process started.")
+
+    while True:
+        task: OctreeLinesetTask = queue_in.get()
+        if task is None:
+            break
+        vertex_offsets = octree_vertex_offsets[1 if task.little_endian_vertex_order else 0]
+        vertices, lines = octree_lineset_from_voxels(
+            vertex_offsets=vertex_offsets,
+            octree_voxel_lines=octree_voxel_lines,
+            voxel_vertices=task.voxel_vertices,
+            voxel_centers=task.voxel_centers,
+            voxel_sizes=task.voxel_sizes,
+            resolution=task.octree_resolution,
+            scene_bound_min=task.scene_bound_min,
+            scene_bound_max=task.scene_bound_max,
+        )
+        if vertices is not None and lines is not None:
+            result = OctreeLinesetResult(
+                vertices=vertices.astype(np.float64),
+                lines=lines.astype(np.int32),
+            )
+            queue_out.put_nowait(result)
+
+    tqdm.write("[Octree Lineset] Exiting octree lineset process.")
 
 
 class GuiBase:
 
-    def __init__(self, cfg: GuiBaseConfig, queue_in: Queue = None, queue_out: Queue = None):
+    def __init__(self, cfg: GuiBaseConfig, queue_to_gui: Queue = None, queue_from_gui: Queue = None):
         o3d_gui.Application.instance.initialize()
 
         self.cfg = cfg
-        self.queue_in = queue_in
-        self.queue_out = queue_out
+        if self.cfg.objects is None:
+            self.cfg.objects = []
+
+        self.queue_in = queue_to_gui
+        self.queue_out = queue_from_gui
 
         self.last_control_packet_timestamp = time.time()
         self.data_packet = GuiDataPacket()  # buffer to hold the latest of each field received
-        self.sleep_interval = 0.001  # 1 ms
+        self.sleep_interval = 0.01  # second
         self.frame_poses = []
+        self.frame_indices = []
         self.traj_length = 0
 
-        cut = np.array([-0.5, 0.5], dtype=np.float32)
-        xx, yy, zz = np.meshgrid(cut, cut, cut, indexing="ij")  # big-endian
-        octree_vertex_offsets = np.stack([xx, yy, zz], axis=-1).reshape(1, 8, 3)  # (1,8,3)
-        self.octree_vertex_offsets = [
-            octree_vertex_offsets,  # big-endian
-            octree_vertex_offsets[:, :, ::-1].copy(),  # little-endian
-        ]
-        self.octree_voxel_lines = np.array(
-            [
-                [0, 1],
-                [1, 3],
-                [3, 2],
-                [2, 0],
-                [0, 4],
-                [4, 5],
-                [5, 7],
-                [7, 6],
-                [6, 4],
-                [1, 5],
-                [2, 6],
-                [3, 7],
-            ],
-            dtype=np.int32,
-        )
+        # cut = np.array([-0.5, 0.5], dtype=np.float32)
+        # xx, yy, zz = np.meshgrid(cut, cut, cut, indexing="ij")  # big-endian
+        # octree_vertex_offsets = np.stack([xx, yy, zz], axis=-1).reshape(1, 8, 3)  # (1,8,3)
+        # self.octree_vertex_offsets = [
+        #     octree_vertex_offsets,  # big-endian
+        #     octree_vertex_offsets[:, :, ::-1].copy(),  # little-endian
+        # ]
+        # self.octree_voxel_lines = np.array(
+        #     [
+        #         [0, 1],
+        #         [1, 3],
+        #         [3, 2],
+        #         [2, 0],
+        #         [0, 4],
+        #         [4, 5],
+        #         [5, 7],
+        #         [7, 6],
+        #         [6, 4],
+        #         [1, 5],
+        #         [2, 6],
+        #         [3, 7],
+        #     ],
+        #     dtype=np.int32,
+        # )
 
         self.camera_init = False
+        self.view_file_loaded = False
         self.sdf_slice_to_save = None
 
         self._init_widgets()
 
+        self.mc_queue_in = Queue()
+        self.mc_queue_out = Queue()
+        self.mc_process = mp.Process(target=marching_cubes_process, args=(self.mc_queue_in, self.mc_queue_out))
+        self.mc_process.start()
+
+        self.octree_queue_in = Queue()
+        self.octree_queue_out = Queue()
+        self.octree_process = mp.Process(
+            target=octree_lineset_process, args=(self.octree_queue_in, self.octree_queue_out)
+        )
+        self.octree_process.start()
+
+        # self.update_barrier = threading.Lock()
+        self.timer_gui_update = CpuTimer("[GUI] Update")
+
         threading.Thread(target=self.communicate_thread).start()
+        # self.communicate_thread()
 
     def _init_widgets(self):
         self.window_width = 2560
@@ -174,9 +405,14 @@ class GuiBase:
             o3d_rendering.ColorGrading.ToneMapping.LINEAR,
         )
         self.widget3d.scene.view.set_color_grading(cg_setting)
+        self.widget3d.scene.show_axes(True)
         self.window.add_child(self.widget3d)
         bounds = self.widget3d.scene.bounding_box
-        self.widget3d.setup_camera(60.0, bounds, bounds.get_center())  # type: ignore
+        self.widget3d.setup_camera(90.0, bounds, bounds.get_center())  # type: ignore
+
+        self.widget3d_width = int(self.window.size.width * self.cfg.panel_split_ratio)
+        self.widget3d_height = self.window.size.height
+
         # 2. set renders
         # scan
         self.scan_name = "scan"
@@ -245,6 +481,14 @@ class GuiBase:
         self.gt_mesh = None
         if self.cfg.gt_mesh_path is not None and os.path.exists(self.cfg.gt_mesh_path):
             self.gt_mesh = o3d.io.read_triangle_mesh(self.cfg.gt_mesh_path)
+            if self.cfg.scene_bound_min is None:
+                self.cfg.scene_bound_min = self.gt_mesh.get_min_bound().tolist()
+            if self.cfg.scene_bound_max is None:
+                self.cfg.scene_bound_max = self.gt_mesh.get_max_bound().tolist()
+            if self.cfg.gt_mesh_offset is not None:
+                self.gt_mesh = self.gt_mesh.translate(self.cfg.gt_mesh_offset)
+            if self.cfg.mesh_remove_ceiling:
+                self.remove_ceiling_from_mesh(self.gt_mesh)
         self.org_cam = o3d.geometry.LineSet()  # camera of identity pose
         s = f = self.cfg.camera_size * self.window.scaling
         self.org_cam.points = o3d.utility.Vector3dVector(
@@ -309,71 +553,121 @@ class GuiBase:
         self.checkbox_view_keyboard.set_on_checked(self._on_checkbox_view_keyboard)
         view_options_line.add_child(self.checkbox_view_keyboard)
 
+        self.checkbox_view_from_file = o3d_gui.Checkbox("From File")
+        self.checkbox_view_from_file.checked = False
+        self.checkbox_view_from_file.set_on_checked(self._on_checkbox_view_from_file)
+        view_options_line.add_child(self.checkbox_view_from_file)
+
+        if self.cfg.view_option.lower() == "follow":
+            pass
+        elif self.cfg.view_option.lower() == "keyboard":
+            self.checkbox_view_follow.checked = False
+            self.checkbox_view_keyboard.checked = True
+            self.checkbox_view_from_file.checked = False
+            self._on_checkbox_view_keyboard(True)
+        elif self.cfg.view_option.lower() == "from_file":
+            self.checkbox_view_follow.checked = False
+            self.checkbox_view_keyboard.checked = False
+            self.checkbox_view_from_file.checked = True
+            self._on_checkbox_view_keyboard(False)
+        else:
+            raise ValueError(f"Unknown view option: {self.cfg.view_option}")
+
         self.panel.add_child(view_options_line)
 
         # c. options to show / hide different objects
         self.panel.add_child(o3d_gui.Label("3D Objects:"))
         object_options_line1 = o3d_gui.Horiz(spacing=0.5 * em, margins=o3d_gui.Margins(left=0.5 * em, top=0.5 * em))
 
+        init_objects = [obj.lower() for obj in self.cfg.objects]
+
         self.checkbox_show_scan = o3d_gui.Checkbox("Scan")
-        self.checkbox_show_scan.checked = True
+        self.checkbox_show_scan.checked = "scan" in init_objects
         self.checkbox_show_scan.set_on_checked(self._on_checkbox_show_scan)
         object_options_line1.add_child(self.checkbox_show_scan)
 
         self.checkbox_show_traj = o3d_gui.Checkbox("Trajectory")
-        self.checkbox_show_traj.checked = True
+        self.checkbox_show_traj.checked = ("trajectory" in init_objects) or ("traj" in init_objects)
         self.checkbox_show_traj.set_on_checked(self._on_checkbox_show_traj)
         object_options_line1.add_child(self.checkbox_show_traj)
 
         self.checkbox_show_kf_cams = o3d_gui.Checkbox("Key Frame Cameras")
-        self.checkbox_show_kf_cams.checked = False
+        self.checkbox_show_kf_cams.checked = (
+            ("key_frame_cams" in init_objects)
+            or ("key_frame_cam" in init_objects)
+            or ("key_frame_cameras" in init_objects)
+            or ("key_frame_camera" in init_objects)
+            or ("kf_cams" in init_objects)
+        )
         self.checkbox_show_kf_cams.set_on_checked(self._on_checkbox_show_kf_cams)
         object_options_line1.add_child(self.checkbox_show_kf_cams)
 
         self.checkbox_show_curr_cam = o3d_gui.Checkbox("Current Camera")
-        self.checkbox_show_curr_cam.checked = False
+        self.checkbox_show_curr_cam.checked = (
+            ("current_camera" in init_objects) or ("curr_cam" in init_objects) or ("current_cam" in init_objects)
+        )
         self.checkbox_show_curr_cam.set_on_checked(self._on_checkbox_show_curr_cam)
         object_options_line1.add_child(self.checkbox_show_curr_cam)
 
+        self.checkbox_show_octree = o3d_gui.Checkbox("Octree")
+        self.checkbox_show_octree.checked = "octree" in init_objects
+        self.checkbox_show_octree.set_on_checked(self._on_checkbox_show_octree)
+        object_options_line1.add_child(self.checkbox_show_octree)
+
         object_options_line2 = o3d_gui.Horiz(spacing=0.5 * em, margins=o3d_gui.Margins(left=0.5 * em, top=0.5 * em))
 
-        self.checkbox_show_octree = o3d_gui.Checkbox("Octree")
-        self.checkbox_show_octree.checked = False
-        self.checkbox_show_octree.set_on_checked(self._on_checkbox_show_octree)
-        object_options_line2.add_child(self.checkbox_show_octree)
-
         self.checkbox_show_sdf = o3d_gui.Checkbox("SDF Slice")
-        self.checkbox_show_sdf.checked = True
+        self.checkbox_show_sdf.checked = ("sdf_slice" in init_objects) or ("sdf" in init_objects)
         self.checkbox_show_sdf.set_on_checked(self._on_checkbox_show_sdf)
         object_options_line2.add_child(self.checkbox_show_sdf)
 
         self.checkbox_show_sdf_by_prior = o3d_gui.Checkbox("SDF Slice (Prior)")
-        self.checkbox_show_sdf_by_prior.checked = False
+        self.checkbox_show_sdf_by_prior.checked = ("sdf_slice_prior" in init_objects) or ("sdf_prior" in init_objects)
         self.checkbox_show_sdf_by_prior.set_on_checked(self._on_checkbox_show_sdf_by_prior)
         object_options_line2.add_child(self.checkbox_show_sdf_by_prior)
 
         self.checkbox_show_sdf_res = o3d_gui.Checkbox("SDF Slice (Residual)")
-        self.checkbox_show_sdf_res.checked = False
+        self.checkbox_show_sdf_res.checked = ("sdf_slice_residual" in init_objects) or ("sdf_residual" in init_objects)
         self.checkbox_show_sdf_res.set_on_checked(self._on_checkbox_show_sdf_residual)
         object_options_line2.add_child(self.checkbox_show_sdf_res)
 
         self.checkbox_show_mesh = o3d_gui.Checkbox("Mesh")
-        self.checkbox_show_mesh.checked = True
+        self.checkbox_show_mesh.checked = "mesh" in init_objects
         self.checkbox_show_mesh.set_on_checked(self._on_checkbox_show_mesh)
         object_options_line2.add_child(self.checkbox_show_mesh)
 
         self.checkbox_show_mesh_by_prior = o3d_gui.Checkbox("Mesh (Prior)")
-        self.checkbox_show_mesh_by_prior.checked = False
+        self.checkbox_show_mesh_by_prior.checked = "mesh_prior" in init_objects
         self.checkbox_show_mesh_by_prior.set_on_checked(self._on_checkbox_show_mesh_by_prior)
         object_options_line2.add_child(self.checkbox_show_mesh_by_prior)
 
         self.checkbox_show_gt_mesh = o3d_gui.Checkbox("GT Mesh")
-        self.checkbox_show_gt_mesh.checked = False
+        self.checkbox_show_gt_mesh.checked = "gt_mesh" in init_objects
         self.checkbox_show_gt_mesh.set_on_checked(self._on_checkbox_show_gt_mesh)
         object_options_line2.add_child(self.checkbox_show_gt_mesh)
 
         self.panel.add_child(object_options_line1)
         self.panel.add_child(object_options_line2)
+
+        # options to control octree update frequency
+        octree_update_freq_line = o3d_gui.Horiz(spacing=0.5 * em, margins=o3d_gui.Margins(left=0.5 * em, top=0.5 * em))
+        octree_update_freq_line.add_child(o3d_gui.Label("Octree Update Frequency:"))
+        self.slider_octree_update_freq = o3d_gui.Slider(o3d_gui.Slider.INT)
+        self.slider_octree_update_freq.set_limits(1, 100)
+        self.slider_octree_update_freq.int_value = self.cfg.octree_update_freq
+        octree_update_freq_line.add_child(self.slider_octree_update_freq)
+
+        self.panel.add_child(octree_update_freq_line)
+
+        # options to control octree min size
+        octree_min_size_line = o3d_gui.Horiz(spacing=0.5 * em, margins=o3d_gui.Margins(left=0.5 * em, top=0.5 * em))
+        octree_min_size_line.add_child(o3d_gui.Label("Octree Min Size:"))
+        self.slider_octree_min_size = o3d_gui.Slider(o3d_gui.Slider.INT)
+        self.slider_octree_min_size.set_limits(1, 32)
+        self.slider_octree_min_size.int_value = self.cfg.octree_min_size
+        octree_min_size_line.add_child(self.slider_octree_min_size)
+
+        self.panel.add_child(octree_min_size_line)
 
         # d. options to control mesh coloring
         mesh_color_options_line = o3d_gui.Horiz(spacing=0.5 * em, margins=o3d_gui.Margins(left=0.5 * em, top=0.5 * em))
@@ -388,6 +682,13 @@ class GuiBase:
         self.checkbox_mesh_color_by_height.checked = False
         self.checkbox_mesh_color_by_height.set_on_checked(self._on_checkbox_mesh_color_by_height)
         mesh_color_options_line.add_child(self.checkbox_mesh_color_by_height)
+
+        if self.cfg.mesh_color_option.lower() == "normal":
+            pass
+        elif self.cfg.mesh_color_option.lower() == "height":
+            self._on_checkbox_mesh_color_by_height(True)
+        else:
+            raise ValueError(f"Unknown mesh color option: {self.cfg.mesh_color_option}")
 
         self.panel.add_child(mesh_color_options_line)
 
@@ -440,12 +741,19 @@ class GuiBase:
         self.combobox_sdf_axis.add_item("Y")
         self.combobox_sdf_axis.add_item("Z")
         self.combobox_sdf_axis.set_on_selection_changed(self._on_combobox_sdf_axis)
-        self.combobox_sdf_axis.selected_index = 2
+        assert 0 <= self.cfg.sdf_slice_axis <= 2, f"Invalid sdf_slice_axis: {self.cfg.sdf_slice_axis}"
+        self.combobox_sdf_axis.selected_index = self.cfg.sdf_slice_axis
         sdf_axis_position_line.add_child(self.combobox_sdf_axis)
         sdf_axis_position_line.add_child(o3d_gui.Label("Position:"))
         self.slider_sdf_position = o3d_gui.Slider(o3d_gui.Slider.DOUBLE)
-        self.slider_sdf_position.set_limits(-10.0, 10.0)
-        self.slider_sdf_position.double_value = 0.0
+        if self.cfg.scene_bound_min is None or self.cfg.scene_bound_max is None:
+            self.slider_sdf_position.set_limits(-10.0, 10.0)
+        else:
+            self.slider_sdf_position.set_limits(
+                self.cfg.scene_bound_min[self.cfg.sdf_slice_axis],
+                self.cfg.scene_bound_max[self.cfg.sdf_slice_axis],
+            )
+        self.slider_sdf_position.double_value = self.cfg.sdf_slice_position
         self.slider_sdf_position.set_on_value_changed(self._on_slider_sdf_position)
         sdf_axis_position_line.add_child(self.slider_sdf_position)
 
@@ -492,13 +800,19 @@ class GuiBase:
         tab_info.add_child(self.label_info_traj_length)
         self.label_info_gpu_mem = o3d_gui.Label("GPU Memory Usage:")
         tab_info.add_child(self.label_info_gpu_mem)
-        self.label_info_fps = o3d_gui.Label("FPS:")
-        tab_info.add_child(self.label_info_fps)
-        self.label_info_timing = o3d_gui.Label("Timing:")
-        tab_info.add_child(self.label_info_timing)
-        self.label_info_loss = o3d_gui.Label("Loss:")
-        tab_info.add_child(self.label_info_loss)
+        self.label_info_num_iterations = o3d_gui.Label("Num Iterations:")
+        tab_info.add_child(self.label_info_num_iterations)
+        self.label_info_training_fps = o3d_gui.Label("Training FPS:")
+        tab_info.add_child(self.label_info_training_fps)
+        self.label_info_gui_fps = o3d_gui.Label("GUI FPS:")
+        tab_info.add_child(self.label_info_gui_fps)
+        self.label_info_timing_and_loss = o3d_gui.Label("Timing:\nLoss:")
+        tab_info.add_child(self.label_info_timing_and_loss)
         tabs.add_tab("Info", tab_info)
+        tab_info = o3d_gui.Vert(spacing=0.5 * em, margins=o3d_gui.Margins(left=0.5 * em, top=0.5 * em))
+        self.label_info_scene_camera = o3d_gui.Label("Scene Camera:\n")
+        tab_info.add_child(self.label_info_scene_camera)
+        tabs.add_tab("Camera", tab_info)
         self.panel.add_child(tabs)
 
         # 3. add panel to window
@@ -507,7 +821,8 @@ class GuiBase:
     def _on_layout(self, layout_context):
         content_rect = self.window.content_rect
         self.widget3d_width = int(self.window.size.width * self.cfg.panel_split_ratio)
-        self.widget3d.frame = o3d_gui.Rect(content_rect.x, content_rect.y, self.widget3d_width, content_rect.height)
+        self.widget3d_height = content_rect.height
+        self.widget3d.frame = o3d_gui.Rect(content_rect.x, content_rect.y, self.widget3d_width, self.widget3d_height)
         self.panel.frame = o3d_gui.Rect(
             self.widget3d.frame.get_right(),
             content_rect.y,
@@ -518,10 +833,11 @@ class GuiBase:
     def _on_close(self):
         self.data_packet.flag_exit = True
         tqdm.write("[GUI] Window is being closed.")
+        self.queue_out.put_nowait(GuiControlPacket(flag_gui_closed=True))
         return True
 
     def _on_switch_run(self, is_on: bool) -> None:
-        if self.switch_run.is_on:
+        if is_on:
             tqdm.write("[GUI] Resume mapping.")
         else:
             tqdm.write("[GUI] Pause mapping.")
@@ -535,20 +851,43 @@ class GuiBase:
     def _on_checkbox_view_follow(self, is_checked: bool) -> None:
         if is_checked:
             tqdm.write("[GUI] View follow mode on.")
+            self.checkbox_view_keyboard.checked = False
+            self._on_checkbox_view_keyboard(False)
+            self.checkbox_view_from_file.checked = False
         else:
             tqdm.write("[GUI] View follow mode off.")
-            # if self.data_packet.frame_pose is not None:
-            #     self.widget3d.scene.camera.look_at(
-            #         self.data_packet.frame_pose[:3, 3],
-            #         self.data_packet.frame_pose[:3, 3] + self.data_packet.frame_pose[:3, 2],
-            #         self.data_packet.frame_pose[:3, 1],
-            #     )
 
     def _on_checkbox_view_keyboard(self, is_checked: bool) -> None:
         if is_checked:
+            self.checkbox_view_follow.checked = False
+            self.checkbox_view_from_file.checked = False
+            tqdm.write("[GUI] View keyboard control on.")
+            # control like a game using WASD,Q,Z,E,R, up, right, left, down
             self.widget3d.set_view_controls(o3d_gui.SceneWidget.Controls.FLY)
         else:
+            tqdm.write("[GUI] View keyboard control off.")
             self.widget3d.set_view_controls(o3d_gui.SceneWidget.Controls.ROTATE_CAMERA_SPHERE)
+
+    def _on_checkbox_view_from_file(self, is_checked: bool) -> None:
+        if is_checked:
+            tqdm.write("[GUI] View from file on.")
+            self.checkbox_view_follow.checked = False
+            self.checkbox_view_keyboard.checked = False
+            self._on_checkbox_view_keyboard(False)
+
+            dialog = o3d_gui.FileDialog(o3d_gui.FileDialog.OPEN, "Select Camera View File", self.window.theme)
+            dialog.add_filter("", "*.yaml")
+            dialog.set_on_cancel(lambda: self.window.close_dialog())
+
+            def on_done(filename: str):
+                self.set_view_from_file(filename)
+                self.window.close_dialog()
+
+            dialog.set_on_done(on_done)
+            self.window.show_dialog(dialog)
+        else:
+            tqdm.write("[GUI] View from file off.")
+            self.view_file_loaded = False
 
     def _on_checkbox_show_scan(self, is_checked: bool) -> None:
         if is_checked:
@@ -611,14 +950,14 @@ class GuiBase:
             tqdm.write("[GUI] Show mesh.")
         else:
             tqdm.write("[GUI] Hide mesh.")
-        self.visualize_mesh(self.mesh_name, self.mesh, is_checked)
+        self.visualize_mesh()
 
     def _on_checkbox_show_mesh_by_prior(self, is_checked: bool) -> None:
         if is_checked:
             tqdm.write("[GUI] Show mesh by prior.")
         else:
             tqdm.write("[GUI] Hide mesh by prior.")
-        self.visualize_mesh(self.mesh_prior_name, self.mesh_prior, is_checked)
+        self.visualize_mesh()
 
     def _on_checkbox_show_gt_mesh(self, is_checked: bool) -> None:
         if is_checked:
@@ -631,15 +970,13 @@ class GuiBase:
         if is_checked:
             self.mesh_render.shader = "normals"
             self.checkbox_mesh_color_by_height.checked = False
-        self.visualize_mesh(self.mesh_name, self.mesh, self.checkbox_show_mesh.checked)
-        self.visualize_mesh(self.mesh_prior_name, self.mesh_prior, self.checkbox_show_mesh_by_prior.checked)
+        self.visualize_mesh()
 
     def _on_checkbox_mesh_color_by_height(self, is_checked: bool) -> None:
         if is_checked:
             self.mesh_render.shader = "defaultLit"
             self.checkbox_mesh_color_by_normal.checked = False
-        self.visualize_mesh(self.mesh_name, self.mesh, self.checkbox_show_mesh.checked)
-        self.visualize_mesh(self.mesh_prior_name, self.mesh_prior, self.checkbox_show_mesh_by_prior.checked)
+        self.visualize_mesh()
 
     def _on_slider_sdf_point_size(self, point_size: float) -> None:
         tqdm.write(f"[GUI] Set SDF point size to {point_size}.")
@@ -651,11 +988,12 @@ class GuiBase:
     def _on_combobox_sdf_axis(self, axis_name: str, axis: int) -> None:
         tqdm.write(f"[GUI] Set SDF slice axis to {axis_name}.")
         position = self.slider_sdf_position.double_value
-        self.slider_sdf_position.set_limits(self.cfg.scene_bound_min[axis], self.cfg.scene_bound_max[axis])
-        if position < self.cfg.scene_bound_min[axis]:
-            position = self.cfg.scene_bound_min[axis]
-        if position > self.cfg.scene_bound_max[axis]:
-            position = self.cfg.scene_bound_max[axis]
+        if self.cfg.scene_bound_min is not None and self.cfg.scene_bound_max is not None:
+            self.slider_sdf_position.set_limits(self.cfg.scene_bound_min[axis], self.cfg.scene_bound_max[axis])
+            if position < self.cfg.scene_bound_min[axis]:
+                position = self.cfg.scene_bound_min[axis]
+            if position > self.cfg.scene_bound_max[axis]:
+                position = self.cfg.scene_bound_max[axis]
         self.slider_sdf_position.double_value = position
         self._on_slider_sdf_position(position)
 
@@ -673,8 +1011,10 @@ class GuiBase:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             o3d.io.write_triangle_mesh(path, self.mesh)
             tqdm.write(f"[GUI] Mesh saved to {path}.")
+            self.window.close_dialog()
 
         dialog.set_on_done(on_done)
+        dialog.set_on_cancel(lambda: self.window.close_dialog())
         self.window.show_dialog(dialog)
 
     def _on_button_save_sdf(self) -> None:
@@ -709,7 +1049,7 @@ class GuiBase:
             ]
             fontsize = 12
 
-            slice_bound: list = self.sdf_slice_to_save["slice_bound"]  # type: ignore
+            bound_min, bound_max = self.sdf_slice_to_save["slice_bound"]  # type: ignore
             sdf_slice = self.sdf_slice_to_save["sdf_slice"]
             axis: int = self.sdf_slice_to_save["axis"]  # type: ignore
             axis_name: str = slice_configs[axis]["axis_name"]
@@ -719,7 +1059,7 @@ class GuiBase:
                 plt.figure()
                 im = plt.imshow(
                     slice_values,
-                    extent=(slice_bound[0][0], slice_bound[1][0], slice_bound[0][1], slice_bound[1][1]),
+                    extent=(bound_min[0], bound_max[0], bound_min[1], bound_max[1]),
                     origin="lower",
                     cmap="jet",
                 )
@@ -733,19 +1073,27 @@ class GuiBase:
                 plt.close()
 
             tqdm.write(f"[GUI] SDF slice saved to {folder_path}.")
+            self.window.close_dialog()
 
         dialog.set_on_done(on_done)
+        dialog.set_on_cancel(lambda: self.window.close_dialog())
         self.window.show_dialog(dialog)
 
     def _on_button_save_model(self) -> None:
         dialog = o3d_gui.FileDialog(o3d_gui.FileDialog.SAVE, "Save Model As", self.window.theme)
-        dialog.set_on_done(lambda path: self.queue_out.put_nowait(GuiControlPacket(save_model_to_path=path)))
+
+        def on_done(path: str):
+            self.queue_out.put_nowait(GuiControlPacket(save_model_to_path=path))
+            self.window.close_dialog()
+
+        dialog.set_on_done(on_done)
+        dialog.set_on_cancel(lambda: self.window.close_dialog())
         dialog.add_filter(".pth", "PyTorch Model (.pth)")
         self.window.show_dialog(dialog)
 
     def _on_button_save_screenshot(self) -> None:
-        diaglog = o3d_gui.FileDialog(o3d_gui.FileDialog.SAVE, "Save Screenshot As", self.window.theme)
-        diaglog.set_path(os.path.join(os.curdir, "screenshot.png"))
+        dialog = o3d_gui.FileDialog(o3d_gui.FileDialog.SAVE, "Save Screenshot As", self.window.theme)
+        dialog.set_path(os.path.join(os.curdir, "screenshot.png"))
 
         def on_done(path: str) -> None:
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -757,41 +1105,47 @@ class GuiBase:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             cv2.imwrite(path, img)
             tqdm.write(f"[GUI] Screenshot saved to {path}.")
+            self.window.close_dialog()
 
-        diaglog.set_on_done(on_done)
-        self.window.show_dialog(diaglog)
+        dialog.set_on_done(on_done)
+        dialog.set_on_cancel(lambda: self.window.close_dialog())
+        self.window.show_dialog(dialog)
 
     def visualize_scan(self, points: np.ndarray = None):
         if points is not None:
+            points = points[:: self.cfg.scan_point_downsample].copy()  # copy to make it contiguous
             self.scan.points = o3d.utility.Vector3dVector(points.astype(np.float64))
             self.scan.paint_uniform_color(np.array(self.cfg.scan_point_color, dtype=np.float64))
 
-        if not self.switch_vis.is_on:
+        if not self.switch_vis.is_on or len(self.scan.points) == 0:
             return
 
         if self.checkbox_show_scan.checked:
-            self.widget3d.scene.remove_geometry(self.scan_name)
+            if self.widget3d.scene.has_geometry(self.scan_name):
+                self.widget3d.scene.remove_geometry(self.scan_name)
             self.widget3d.scene.add_geometry(self.scan_name, self.scan, self.scan_render)
+
         self.widget3d.scene.show_geometry(self.scan_name, self.checkbox_show_scan.checked)
 
     def visualize_trajectory(self):
         if len(self.traj.points) < len(self.frame_poses):
-            for i in range(len(self.traj.points), len(self.frame_poses)):
-                self.traj.points.append(self.frame_poses[i][:3, 3])
-                n = len(self.traj.points)
-                if n > 1:
-                    self.traj.lines.append(np.array([n - 2, n - 1], dtype=np.int32))
-                    self.traj.colors.append(np.array(self.cfg.traj_color, dtype=np.float64))
-                    self.traj_length += np.linalg.norm(self.traj.points[-1] - self.traj.points[-2])
+            points = np.stack([pose[:3, 3] for pose in self.frame_poses], axis=0)
+            self.traj.points = o3d.utility.Vector3dVector(points.astype(np.float64))
+            if len(points) > 1:
+                lines = np.array([[i, i + 1] for i in range(len(points) - 1)], dtype=np.int32)
+                self.traj.lines = o3d.utility.Vector2iVector(lines)
+                self.traj.paint_uniform_color(self.cfg.traj_color)
+                self.traj_length = np.sum(np.linalg.norm(points[1:] - points[:-1], axis=1))
 
-        if not self.switch_vis.is_on:
+        if not self.switch_vis.is_on or len(self.traj.lines) == 0 or self.traj_length < 0.01:
             return
 
         if self.checkbox_show_traj.checked:
-            self.widget3d.scene.remove_geometry(self.traj_name)
+            if self.widget3d.scene.has_geometry(self.traj_name):
+                self.widget3d.scene.remove_geometry(self.traj_name)
             self.widget3d.scene.add_geometry(self.traj_name, self.traj, self.traj_render)
 
-        self.widget3d.scene.show_geometry(self.traj_name, self.checkbox_show_traj.checked and len(self.traj.lines) > 0)
+        self.widget3d.scene.show_geometry(self.traj_name, self.checkbox_show_traj.checked)
 
     def visualize_kf_cams(self, key_frame_indices: list = None, selected_key_frame_indices: list = None):
         if key_frame_indices is not None and selected_key_frame_indices is not None:
@@ -811,11 +1165,12 @@ class GuiBase:
                 for i in range(m * idx, m * (idx + 1)):
                     self.kf_cams.colors[i] = np.array(self.cfg.camera_color_selected_key_frame, dtype=np.float64)
 
-        if not self.switch_vis.is_on:
+        if not self.switch_vis.is_on or len(self.kf_cams.lines) == 0:
             return
 
         if self.checkbox_show_kf_cams.checked:
-            self.widget3d.scene.remove_geometry(self.kf_cams_name)
+            if self.widget3d.scene.has_geometry(self.kf_cams_name):
+                self.widget3d.scene.remove_geometry(self.kf_cams_name)
             self.widget3d.scene.add_geometry(self.kf_cams_name, self.kf_cams, self.kf_cams_render)
 
         self.widget3d.scene.show_geometry(self.kf_cams_name, self.checkbox_show_kf_cams.checked)
@@ -829,38 +1184,40 @@ class GuiBase:
                 self.curr_cam.lines = self.org_cam.lines
                 self.curr_cam.paint_uniform_color(np.array(self.cfg.camera_color_current, dtype=np.float64))
 
-        if not self.switch_vis.is_on:
+        if not self.switch_vis.is_on or len(self.curr_cam.lines) == 0:
             return
 
         if self.checkbox_show_curr_cam.checked:
-            self.widget3d.scene.remove_geometry(self.curr_cam_name)
+            if self.widget3d.scene.has_geometry(self.curr_cam_name):
+                self.widget3d.scene.remove_geometry(self.curr_cam_name)
             self.widget3d.scene.add_geometry(self.curr_cam_name, self.curr_cam, self.curr_cam_render)
 
         self.widget3d.scene.show_geometry(self.curr_cam_name, self.checkbox_show_curr_cam.checked)
 
-    def visualize_octree(
-        self,
-        voxel_centers: Optional[np.ndarray] = None,  # (N, 3)
-        voxel_sizes: Optional[np.ndarray] = None,  # (N, 1)
-        voxel_vertices: Optional[np.ndarray] = None,  # (N, 8)
-        little_endian_vertex_order: bool = False,
-    ):
-        if voxel_centers is not None and voxel_sizes is not None and voxel_vertices is not None:
-            vertex_offsets = self.octree_vertex_offsets[1 if little_endian_vertex_order else 0]  # (1, 8, 3)
-            n_vertices = np.max(voxel_vertices) + 1
-            vertices = voxel_centers.reshape(-1, 1, 3) + voxel_sizes.reshape(-1, 1, 1) * vertex_offsets
-            vertices_unique = np.zeros((n_vertices, 3), dtype=np.float64)
-            vertices_unique[voxel_vertices.flatten()] = vertices.reshape(-1, 3)
-            lines = voxel_vertices[:, self.octree_voxel_lines].reshape(-1, 2)  # (N, 12, 2) -> (N*12, 2)
-            self.octree.points = o3d.utility.Vector3dVector(vertices_unique)
-            self.octree.lines = o3d.utility.Vector2iVector(lines.astype(np.int32))
-            self.octree.paint_uniform_color(np.array(self.cfg.octree_color, dtype=np.float64))
+    def visualize_octree(self):
+        processed_octrees = 0
+        max_octrees_per_call = 2  # Limit processing to prevent blocking
 
-        if not self.switch_vis.is_on:
+        while processed_octrees < max_octrees_per_call and not self.octree_queue_out.empty():
+            try:
+                octree_data: OctreeLinesetResult = self.octree_queue_out.get_nowait()
+
+                self.octree.points = o3d.utility.Vector3dVector(octree_data.vertices)
+                self.octree.lines = o3d.utility.Vector2iVector(octree_data.lines)
+
+                processed_octrees += 1
+            except queue.Empty:
+                break
+            except Exception as e:
+                tqdm.write(f"[GUI] Warning: failed to get octree from queue: {e}")
+                break
+
+        if not self.switch_vis.is_on or self.octree.is_empty() or processed_octrees == 0:
             return
 
         if self.checkbox_show_octree.checked:
-            self.widget3d.scene.remove_geometry(self.octree_name)
+            if self.widget3d.scene.has_geometry(self.octree_name):
+                self.widget3d.scene.remove_geometry(self.octree_name)
             self.widget3d.scene.add_geometry(self.octree_name, self.octree, self.octree_render)
 
         self.widget3d.scene.show_geometry(self.octree_name, self.checkbox_show_octree.checked)
@@ -886,107 +1243,154 @@ class GuiBase:
             if axis == 0:
                 # bounds = (bounds_min, bounds_max)
                 y, z = np.meshgrid(
-                    [
-                        np.arange(bounds[0][0], bounds[1][0], resolution),
-                        np.arange(bounds[0][1], bounds[1][1], resolution),
-                    ],
-                    indexing="ij",
+                    np.arange(bounds[0][0], bounds[1][0], resolution),
+                    np.arange(bounds[0][1], bounds[1][1], resolution),
+                    indexing="xy",
                 )
                 points = np.stack((np.full_like(y, pos), y, z), axis=-1).astype(np.float64)
             elif axis == 1:
                 x, z = np.meshgrid(
-                    [
-                        np.arange(bounds[0][0], bounds[1][0], resolution),
-                        np.arange(bounds[0][2], bounds[1][2], resolution),
-                    ],
-                    indexing="ij",
+                    np.arange(bounds[0][0], bounds[1][0], resolution),
+                    np.arange(bounds[0][2], bounds[1][2], resolution),
+                    indexing="xy",
                 )
                 points = np.stack((x, np.full_like(x, pos), z), axis=-1).astype(np.float64)
             else:  # axis == 2
                 x, y = np.meshgrid(
-                    [
-                        np.arange(bounds[0][0], bounds[1][0], resolution),
-                        np.arange(bounds[0][1], bounds[1][1], resolution),
-                    ],
-                    indexing="ij",
+                    np.arange(bounds[0][0], bounds[1][0], resolution),
+                    np.arange(bounds[0][1], bounds[1][1], resolution),
+                    indexing="xy",
                 )
                 points = np.stack((x, y, np.full_like(x, pos)), axis=-1).astype(np.float64)
 
             color_map = cm.get_cmap(self.cfg.sdf_color_map)
-            sdf_min = np.min(sdf_values)
-            sdf_max = np.max(sdf_values)
+            sdf_min = np.min(sdf_values).item()
+            sdf_max = np.max(sdf_values).item()
             sdf_values = np.clip((sdf_values - sdf_min) / (sdf_max - sdf_min + 1e-6), 0, 1)
             colors = color_map(sdf_values.flatten())[:, :3]
             self.sdf_slice.points = o3d.utility.Vector3dVector(points.reshape(-1, 3))
             self.sdf_slice.colors = o3d.utility.Vector3dVector(colors.astype(np.float64))
 
-        if not self.switch_vis.is_on:
+        if not self.switch_vis.is_on or len(self.sdf_slice.points) == 0:
             return
 
         if show:
-            self.widget3d.scene.remove_geometry(sdf_name)
+            if self.widget3d.scene.has_geometry(sdf_name):
+                self.widget3d.scene.remove_geometry(sdf_name)
             self.widget3d.scene.add_geometry(sdf_name, sdf_slice, self.sdf_render)
 
         self.widget3d.scene.show_geometry(sdf_name, show)
 
-    def visualize_mesh(
-        self,
-        mesh_name: str,
-        mesh: o3d.geometry.TriangleMesh,
-        show: bool,
-        bounds: list = None,
-        resolution: float = None,
-        sdf_grid: np.ndarray = None,
-    ):
-        if bounds is not None and resolution is not None and sdf_grid is not None:
-            mc = MarchingCubes()
-            vertices, faces, face_normals = mc.run(
-                coords_min=bounds[0],
-                grid_res=[resolution] * 3,
-                grid_shape=sdf_grid.shape,
-                grid_values=sdf_grid.flatten(),
-                iso_value=0.0,
-                row_major=True,
-                parallel=True,
-            )
-            mesh.vertices = o3d.utility.Vector3dVector(vertices.astype(np.float64))
-            mesh.triangles = o3d.utility.Vector3iVector(faces.astype(np.int32))
-            mesh.triangle_normals = o3d.utility.Vector3dVector(face_normals.astype(np.float64))
-            mesh.compute_vertex_normals()
+    def colorize_mesh(self, mesh: o3d.geometry.TriangleMesh):
+        if mesh.is_empty():
+            return
+        if self.checkbox_mesh_color_by_height.checked:
+            z_values = np.asarray(mesh.vertices)[:, 2]
+            z_min, z_max = np.min(z_values).item(), np.max(z_values).item()
+            z_normalized = np.clip((z_values - z_min) / (z_max - z_min + 1e-6), 0.0, 1.0)
+            color_map = cm.get_cmap(self.cfg.mesh_height_color_map)
+            colors = color_map(z_normalized)[:, :3].astype(np.float64)
+            mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+        else:
             mesh.vertex_colors.clear()
+
+    def remove_ceiling_from_mesh(self, mesh: o3d.geometry.TriangleMesh):
+        z_max = mesh.get_max_bound()[2]
+        ceiling_thickness = self.cfg.mesh_ceiling_thickness
+        vertices = np.asarray(mesh.vertices)
+        faces = np.asarray(mesh.triangles)
+        face_z_max = np.max(vertices[faces][:, :, 2], axis=1)
+        mask = face_z_max < z_max - ceiling_thickness
+        faces = faces[mask]
+        mesh.triangles = o3d.utility.Vector3iVector(faces)
+        if len(mesh.triangle_normals) > 0:
+            triangle_normals = np.asarray(mesh.triangle_normals)
+            mesh.triangle_normals = o3d.utility.Vector3dVector(triangle_normals[mask])
+
+    def visualize_mesh(self):
+        processed_meshes = 0
+        max_meshes_per_call = 5  # Limit processing to prevent blocking
+
+        while processed_meshes < max_meshes_per_call and not self.mc_queue_out.empty():
+            try:
+                mesh_data: MarchingCubesResult = self.mc_queue_out.get_nowait()
+                processed_meshes += 1
+
+                if mesh_data.name == "sdf":
+                    self.mesh.vertices = o3d.utility.Vector3dVector(mesh_data.vertices)
+                    self.mesh.triangles = o3d.utility.Vector3iVector(mesh_data.triangles)
+                    self.mesh.triangle_normals = o3d.utility.Vector3dVector(mesh_data.triangle_normals)
+                    if self.cfg.mesh_remove_ceiling:
+                        self.remove_ceiling_from_mesh(self.mesh)
+                    self.colorize_mesh(self.mesh)
+                elif mesh_data.name == "sdf_prior":
+                    self.mesh_prior.vertices = o3d.utility.Vector3dVector(mesh_data.vertices)
+                    self.mesh_prior.triangles = o3d.utility.Vector3iVector(mesh_data.triangles)
+                    self.mesh_prior.triangle_normals = o3d.utility.Vector3dVector(mesh_data.triangle_normals)
+                    if self.cfg.mesh_remove_ceiling:
+                        self.remove_ceiling_from_mesh(self.mesh_prior)
+                    self.colorize_mesh(self.mesh_prior)
+            except queue.Empty:
+                break
+            except Exception as e:
+                tqdm.write(f"[GUI] Error processing marching cubes result: {e}")
+                break
 
         if not self.switch_vis.is_on:
             return
 
-        if show:
-            if self.checkbox_mesh_color_by_height.checked:
-                z_values = np.asarray(mesh.vertices)[:, 2]
-                z_min, z_max = np.min(z_values), np.max(z_values)
-                z_normalized = np.clip((z_values - z_min) / (z_max - z_min + 1e-6), 0.0, 1.0)
-                color_map = cm.get_cmap(self.cfg.mesh_height_color_map)
-                colors = color_map(z_normalized)[:, :3].astype(np.float64)
-                mesh.vertex_colors = o3d.utility.Vector3dVector(colors)
+        if not self.mesh.is_empty():
+            if self.checkbox_show_mesh.checked:
+                if self.widget3d.scene.has_geometry(self.mesh_name):
+                    self.widget3d.scene.remove_geometry(self.mesh_name)
+                self.widget3d.scene.add_geometry(self.mesh_name, self.mesh, self.mesh_render)
+            self.widget3d.scene.show_geometry(self.mesh_name, self.checkbox_show_mesh.checked)
 
-            self.widget3d.scene.remove_geometry(mesh_name)
-            self.widget3d.scene.add_geometry(mesh_name, mesh, self.mesh_render)
+        if not self.mesh_prior.is_empty():
+            if self.checkbox_show_mesh_by_prior.checked:
+                if self.widget3d.scene.has_geometry(self.mesh_prior_name):
+                    self.widget3d.scene.remove_geometry(self.mesh_prior_name)
+                self.widget3d.scene.add_geometry(self.mesh_prior_name, self.mesh_prior, self.mesh_render)
+            self.widget3d.scene.show_geometry(self.mesh_prior_name, self.checkbox_show_mesh_by_prior.checked)
 
-        self.widget3d.scene.show_geometry(mesh_name, show)
-
-    def visualize_gt_mesh(self, data=None):
+    def visualize_gt_mesh(self):
         if self.gt_mesh is None:
             return
 
-        if not self.switch_vis.is_on:
+        if not self.switch_vis.is_on or self.gt_mesh.is_empty():
             return
 
         if self.checkbox_show_gt_mesh.checked:
-            self.widget3d.scene.remove_geometry(self.gt_mesh_name)
+            if self.widget3d.scene.has_geometry(self.gt_mesh_name):
+                self.widget3d.scene.remove_geometry(self.gt_mesh_name)
             self.widget3d.scene.add_geometry(self.gt_mesh_name, self.gt_mesh, self.gt_mesh_render)
         self.widget3d.scene.show_geometry(self.gt_mesh_name, self.checkbox_show_gt_mesh.checked)
 
+    def set_camera(self):
+        if self.checkbox_view_follow.checked:
+            self.center_bev()
+        elif self.checkbox_view_keyboard.checked:
+            pass  # do nothing, user controls the view
+        elif self.checkbox_view_from_file.checked and self.cfg.view_file is not None and not self.view_file_loaded:
+            assert os.path.exists(self.cfg.view_file), f"View file {self.cfg.view_file} does not exist."
+            self.set_view_from_file(self.cfg.view_file)
+            self.view_file_loaded = True
+
     def center_bev(self):
         bounds = self.widget3d.scene.bounding_box
-        self.widget3d.setup_camera(90, bounds, bounds.get_center())
+        self.widget3d.setup_camera(90, bounds, bounds.get_center())  # type: ignore
+
+    def set_view_from_file(self, path: str):
+        if not os.path.isfile(path):
+            return
+        # in the file, we have the projection matrix (4, 4),
+        with open(path, "r") as f:
+            view = yaml.safe_load(f)
+        intrinsics = np.array(view["intrinsics"])
+        extrinsics = np.array(view["extrinsics"])
+        bounds = deepcopy(self.widget3d.scene.bounding_box)
+        bounds = bounds.scale(1.2, bounds.get_center())
+        self.widget3d.setup_camera(intrinsics, extrinsics, self.widget3d_width, self.widget3d_height, bounds)  # type: ignore
 
     @classmethod
     def run(cls, *args, **kwargs):
@@ -998,38 +1402,52 @@ class GuiBase:
     def send_control_packet(self):
         if self.queue_out is None:
             return
-        packet = GuiControlPacket()
-        packet.flag_mapping_run = self.switch_run.is_on
-        if self.checkbox_show_sdf.checked:
-            packet.sdf_slice_frequency = self.slider_sdf_update_freq.int_value
-            packet.sdf_slice_axis = self.combobox_sdf_axis.selected_index
-            packet.sdf_slice_position = self.slider_sdf_position.double_value
-            packet.sdf_slice_resolution = self.slider_sdf_resolution.int_value
-        if self.checkbox_show_mesh.checked:
-            packet.sdf_grid_frequency = self.slider_mesh_update_freq.int_value
-            packet.sdf_grid_resolution = self.slider_mesh_resolution.int_value
-        self.queue_out.put(packet)
+        try:
+            packet = GuiControlPacket()
+            packet.flag_mapping_run = self.switch_run.is_on
+            if self.checkbox_show_octree.checked:
+                packet.octree_update_frequency = self.slider_octree_update_freq.int_value
+                packet.octree_min_size = self.slider_octree_min_size.int_value
+            if self.checkbox_show_sdf.checked:
+                packet.sdf_slice_frequency = self.slider_sdf_update_freq.int_value
+                packet.sdf_slice_axis = self.combobox_sdf_axis.selected_index
+                packet.sdf_slice_position = self.slider_sdf_position.double_value
+                packet.sdf_slice_resolution = 1.0 / self.slider_sdf_resolution.int_value
+            if self.checkbox_show_mesh.checked or self.checkbox_show_mesh_by_prior.checked:
+                packet.sdf_grid_frequency = self.slider_mesh_update_freq.int_value
+                packet.sdf_grid_resolution = 1.0 / self.slider_mesh_resolution.int_value
+            self.queue_out.put_nowait(packet)
+        except Exception as e:
+            tqdm.write(f"[GUI] Error sending control packet: {e}")
 
     def receive_data_packet(self, get_latest: bool = True):
         if self.queue_in is None:
             return None
         packet: Optional[GuiDataPacket] = None
-        while True and not self.queue_in.empty():
+        processed_packets = 0
+        max_packets_per_call = 10  # Limit processing to prevent blocking
+
+        while processed_packets < max_packets_per_call and not self.queue_in.empty():
             try:
-                packet_new = self.queue_in.get_nowait()
-                if packet is not None:
-                    del packet
-                packet = packet_new
+                packet = self.queue_in.get_nowait()
+                processed_packets += 1
+
                 if packet.flag_exit:
                     tqdm.write("[GUI] Received exit signal. Closing GUI...")
                     self.data_packet.flag_exit = True
+                    self.queue_out.put_nowait(GuiControlPacket(flag_gui_closed=True))
                     break
+
                 if packet.mapping_end:
                     self.data_packet.mapping_end = True
 
+                if packet.num_iterations >= 0:
+                    self.data_packet.num_iterations = packet.num_iterations
                 if packet.frame_idx >= 0:
                     self.data_packet.frame_idx = packet.frame_idx
+                    self.frame_indices.append(packet.frame_idx)
                 if packet.frame_pose is not None:
+                    self.frame_poses.append(packet.frame_pose)
                     self.data_packet.frame_pose = packet.frame_pose
                 if packet.scan_points is not None:
                     self.data_packet.scan_points = packet.scan_points
@@ -1047,6 +1465,8 @@ class GuiBase:
                     self.data_packet.octree_vertices = packet.octree_vertices
                 if packet.octree_little_endian_vertex_order is not None:
                     self.data_packet.octree_little_endian_vertex_order = packet.octree_little_endian_vertex_order
+                if packet.octree_resolution is not None:
+                    self.data_packet.octree_resolution = packet.octree_resolution
 
                 if packet.sdf_slice_bounds is not None:
                     self.data_packet.sdf_slice_bounds = packet.sdf_slice_bounds
@@ -1072,28 +1492,44 @@ class GuiBase:
                     self.data_packet.time_stats = packet.time_stats
                 if packet.loss_stats is not None:
                     self.data_packet.loss_stats = packet.loss_stats
+                if packet.gpu_mem_usage is not None:
+                    self.data_packet.gpu_mem_usage = packet.gpu_mem_usage
 
                 if not get_latest:
                     break
-            except asyncio.QueueEmpty:
+            except queue.Empty:
+                break
+            except Exception as e:
+                tqdm.write(f"[GUI] Error processing queue packet: {e}")
                 break
         return packet
+
+    def update_wrapper(self):
+        with self.timer_gui_update:
+            self.update()
 
     def update(self):
         data_packet = self.receive_data_packet(get_latest=True)
         if self.data_packet.flag_exit:
             tqdm.write("[GUI] Received exit signal. Closing GUI...")
+            self.queue_out.put_nowait(GuiControlPacket(flag_gui_closed=True))
             return
 
         if data_packet is not None:
             # we received some new data
             # multiple data packets may be merged into one and stored in self.data_packet
             if self.data_packet.mapping_end:
-                tqdm.write("[GUI] Mapping has ended.")
                 self.sleep_interval = 0.1  # slow down
 
+            if self.data_packet.num_iterations >= 0:
+                self.label_info_num_iterations.text = f"Num Iterations: {self.data_packet.num_iterations}"
+                self.data_packet.num_iterations = -1  # reset
+
+            if self.data_packet.frame_idx >= 0:
+                self.label_info_frame_idx.text = f"Frame: {self.data_packet.frame_idx}"
+                self.data_packet.frame_idx = -1  # reset
+
             if self.data_packet.frame_pose is not None:
-                self.frame_poses.append(self.data_packet.frame_pose)
                 self.visualize_trajectory()  # update trajectory
                 self.visualize_curr_cam(self.data_packet.frame_pose)  # update current camera
                 self.label_info_traj_length.text = f"Travel Distance: {self.traj_length:.3f} m"
@@ -1120,23 +1556,31 @@ class GuiBase:
                 self.data_packet.octree_voxel_centers is not None
                 or self.data_packet.octree_voxel_sizes is not None
                 or self.data_packet.octree_vertices is not None
+                or self.data_packet.octree_resolution is not None
             ):
                 assert self.data_packet.octree_voxel_centers is not None
                 assert self.data_packet.octree_voxel_sizes is not None
                 assert self.data_packet.octree_vertices is not None
-                self.visualize_octree(
-                    self.data_packet.octree_voxel_centers,
-                    self.data_packet.octree_voxel_sizes,
-                    self.data_packet.octree_vertices,
-                    self.data_packet.octree_little_endian_vertex_order,
+                assert self.data_packet.octree_resolution is not None
+
+                self.octree_queue_in.put_nowait(
+                    OctreeLinesetTask(
+                        voxel_centers=self.data_packet.octree_voxel_centers,
+                        voxel_sizes=self.data_packet.octree_voxel_sizes,
+                        voxel_vertices=self.data_packet.octree_vertices,
+                        octree_resolution=self.data_packet.octree_resolution,
+                        little_endian_vertex_order=self.data_packet.octree_little_endian_vertex_order,
+                        scene_bound_min=self.cfg.scene_bound_min,
+                        scene_bound_max=self.cfg.scene_bound_max,
+                    )
                 )
+
                 self.data_packet.octree_voxel_centers = None  # reset
                 self.data_packet.octree_voxel_sizes = None  # reset
                 self.data_packet.octree_vertices = None  # reset
+                self.data_packet.octree_resolution = None  # reset
 
-            if self.data_packet.frame_idx >= 0:
-                self.label_info_frame_idx.text = f"Frame: {self.data_packet.frame_idx}"
-                self.data_packet.frame_idx = -1  # reset
+            self.visualize_octree()
 
             # update sdf slice
             if (
@@ -1178,7 +1622,7 @@ class GuiBase:
                     self.data_packet.sdf_slice_axis,
                     self.data_packet.sdf_slice_position,
                     self.data_packet.sdf_slice_resolution,
-                    self.data_packet.sdf_slice["sdf_by_prior"],
+                    self.data_packet.sdf_slice["sdf_prior"],
                 )
                 self.data_packet.sdf_slice_bounds = None  # reset
                 self.data_packet.sdf_slice_axis = None  # reset
@@ -1196,61 +1640,166 @@ class GuiBase:
                 assert self.data_packet.sdf_grid_resolution is not None
                 assert self.data_packet.sdf_grid is not None
 
-                self.visualize_mesh(
-                    self.mesh_name,
-                    self.mesh,
-                    self.checkbox_show_mesh.checked,
-                    self.data_packet.sdf_grid_bounds,
-                    self.data_packet.sdf_grid_resolution,
-                    self.data_packet.sdf_grid["sdf"],
+                self.mc_queue_in.put_nowait(
+                    MarchingCubesTask(
+                        name="sdf",
+                        coords_min=self.data_packet.sdf_grid_bounds[0],
+                        grid_res=[self.data_packet.sdf_grid_resolution] * 3,
+                        grid_values=self.data_packet.sdf_grid["sdf"],
+                    )
                 )
-                self.visualize_mesh(
-                    self.mesh_prior_name,
-                    self.mesh_prior,
-                    self.checkbox_show_mesh_by_prior.checked,
-                    self.data_packet.sdf_grid_bounds,
-                    self.data_packet.sdf_grid_resolution,
-                    self.data_packet.sdf_grid["sdf_by_prior"],
+                self.mc_queue_in.put_nowait(
+                    MarchingCubesTask(
+                        name="sdf_prior",
+                        coords_min=self.data_packet.sdf_grid_bounds[0],
+                        grid_res=[self.data_packet.sdf_grid_resolution] * 3,
+                        grid_values=self.data_packet.sdf_grid["sdf_prior"],
+                    )
                 )
                 self.data_packet.sdf_grid_bounds = None  # reset
                 self.data_packet.sdf_grid_resolution = None  # reset
                 self.data_packet.sdf_grid = None  # reset
+
+            self.visualize_mesh()  # update mesh visualization
 
             if self.data_packet.model_saved_path is not None:
                 tqdm.write(f"[GUI] Model saved to {self.data_packet.model_saved_path}.")
                 self.data_packet.model_saved_path = None  # reset
 
             if self.data_packet.time_stats is not None:
-                self.label_info_fps.text = f"FPS: {1.0 / (self.data_packet.time_stats['train_frame'] + 1e-6):.3f}"
-                self.label_info_timing.text = f"Timing:\n" + "\n".join(
+                fps = 1.0 / (self.data_packet.time_stats.get("train_frame", 1e-6))
+                self.label_info_training_fps.text = f"Training FPS: {fps:.3f}"
+                self.label_info_timing_and_loss.text = f"Timing:\n" + "\n".join(
                     [f"  {k}: {v:.6f} s" for k, v in self.data_packet.time_stats.items()]
                 )
                 self.data_packet.time_stats = None  # reset
 
+            if self.timer_gui_update.average_t > 0:
+                fps = 1.0 / self.timer_gui_update.average_t
+                self.label_info_gui_fps.text = f"GUI FPS: {fps:.3f}"
+
             if self.data_packet.loss_stats is not None:
-                self.label_info_loss.text = f"Loss:\n" + "\n".join(
-                    [f"  {k}: {v:.6f}" for k, v in self.data_packet.loss_stats.items()]
+                loss_stats = flatten_dict(self.data_packet.loss_stats)
+                self.label_info_timing_and_loss.text += f"\nLoss:\n" + "\n".join(
+                    [f"  {k}: {v:.6f}" for k, v in loss_stats.items()]
                 )
                 self.data_packet.loss_stats = None  # reset
 
-        if not self.camera_init:
-            self.center_bev()
-            self.camera_init = True
+            if self.data_packet.gpu_mem_usage is not None:
+                self.label_info_gpu_mem.text = f"GPU Memory Usage: {self.data_packet.gpu_mem_usage:.3f} GB"
+                self.data_packet.gpu_mem_usage = None  # reset
 
-        current_time = time.time()
-        if current_time - self.last_control_packet_timestamp > 0.005:  # 200 Hz
-            self.send_control_packet()
-            self.last_control_packet_timestamp = current_time
+            self.widget3d.scene.camera.get_model_matrix()
+            camera = self.widget3d.scene.camera
+            model_matrix = camera.get_model_matrix()
+            extrinsic = np.linalg.inv(
+                model_matrix
+                @ np.array(  # toGL
+                    [
+                        [1, 0, 0, 0],
+                        [0, -1, 0, 0],
+                        [0, 0, -1, 0],
+                        [0, 0, 0, 1],
+                    ]
+                )
+            )
+            projection_matrix = camera.get_projection_matrix()
+            intrinsics = np.array(
+                [
+                    [
+                        projection_matrix[0, 0] * self.widget3d_width / 2,
+                        0,
+                        (1 - projection_matrix[2, 0]) * self.widget3d_width / 2,
+                    ],
+                    [
+                        0,
+                        projection_matrix[1, 1] * self.widget3d_height / 2,
+                        (1 + projection_matrix[2, 1]) * self.widget3d_height / 2,
+                    ],
+                    [0, 0, 1],
+                ]
+            )
+            far = camera.get_far()
+            near = camera.get_near()
+            fov = camera.get_field_of_view()
+            scene_bounds = self.widget3d.scene.bounding_box
+            self.label_info_scene_camera.text = f"Scene & Camera Info:\n"
+            self.label_info_scene_camera.text += f"Extrinsic:\n"
+            for row in extrinsic:
+                self.label_info_scene_camera.text += "  " + " ".join(f"{val:.3f}" for val in row) + "\n"
+            self.label_info_scene_camera.text += f"Intrinsics:\n"
+            for row in intrinsics:
+                self.label_info_scene_camera.text += "  " + " ".join(f"{val:.3f}" for val in row) + "\n"
+            self.label_info_scene_camera.text += f"FOV: {fov:.3f} deg\nNear: {near:.3f} m\nFar: {far:.3f} m\n"
+            self.label_info_scene_camera.text += f"Scene Bounds:\n"
+            self.label_info_scene_camera.text += f"  Min: {scene_bounds.min_bound}\n"
+            self.label_info_scene_camera.text += f"  Max: {scene_bounds.max_bound}\n"
+            self.label_info_scene_camera.text += f"  Extent: {scene_bounds.get_extent()}\n"
+
+        if not self.camera_init:
+            self.camera_init = True
+            self.visualize_gt_mesh()  # show gt mesh at the beginning if available and enabled
+
+        self.set_camera()
+
+        self.window.post_redraw()
+
+        # tqdm.write(f"[GUI] Finished update at {time.time()}")
 
     def communicate_thread(self):
+        debug_counter = 0  # Counter to reduce debug output frequency
         while True:
             time.sleep(self.sleep_interval)
+
+            # Only print debug message every 100 iterations (once per second at 10ms intervals)
+            debug_counter += 1
+            if debug_counter % 100 == 0:
+                tqdm.write("[GUI] Communicate thread awake.")
+                debug_counter = 0
+
+            current_time = time.time()
+            if current_time - self.last_control_packet_timestamp > 0.01:  # 100 Hz
+                self.send_control_packet()
+                self.last_control_packet_timestamp = current_time
+
             if self.data_packet.flag_exit:
-                tqdm.write("[GUI] Exiting communicate thread...")
+                self.queue_out.put_nowait(GuiControlPacket(flag_gui_closed=True))
+                tqdm.write(s="[GUI] Exiting communicate thread...")
+
                 while not self.queue_in.empty():
                     self.queue_in.get_nowait()
+                tqdm.write("[GUI] Cleaned up input queue.")
                 self.queue_in = None
                 self.queue_out = None
+
+                while not self.mc_queue_in.empty():
+                    self.mc_queue_in.get_nowait()
+                tqdm.write("[GUI] Cleaned up mc_queue_in.")
+                while not self.mc_queue_out.empty():
+                    self.mc_queue_out.get_nowait()
+                tqdm.write("[GUI] Cleaned up mc_queue_out.")
+                self.mc_process.terminate()
+                self.mc_process.join()
+                self.mc_queue_in = None
+                self.mc_queue_out = None
+                tqdm.write("[GUI] Terminated marching cubes process.")
+
+                while not self.octree_queue_in.empty():
+                    self.octree_queue_in.get_nowait()
+                tqdm.write("[GUI] Cleaned up octree_queue_in.")
+                while not self.octree_queue_out.empty():
+                    self.octree_queue_out.get_nowait()
+                tqdm.write("[GUI] Cleaned up octree_queue_out.")
+                self.octree_process.terminate()
+                self.octree_process.join()
+                self.octree_queue_in = None
+                self.octree_queue_out = None
+                tqdm.write("[GUI] Terminated octree process.")
+
                 o3d_gui.Application.instance.quit()
                 break  # exit thread
-            o3d_gui.Application.instance.post_to_main_thread(self.window, self.update)
+
+            try:
+                o3d_gui.Application.instance.post_to_main_thread(self.window, lambda: self.update_wrapper())
+            except Exception as e:
+                tqdm.write(f"[GUI] Error posting to main thread: {e}")

@@ -9,8 +9,8 @@ from grad_sdf.utils.config_abc import ConfigABC
 
 @dataclass
 class ResidualNetConfig(ConfigABC):
-    bound_min: list = None  # (3,) minimum corner of the bounding box of the scene
-    bound_max: list = None  # (3,) maximum corner of the bounding box of the scene
+    bound_min: list = None  # (3, ) minimum corner of the bounding box of the scene
+    bound_max: list = None  # (3, ) maximum corner of the bounding box of the scene
     resolution: float = 0.05  # the size of the smallest voxel
     num_levels: int = 4  # number of levels in the hash encoding
     feature_dims: int = 2  # number of features per level
