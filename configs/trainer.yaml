@@ -72,7 +72,7 @@ sample_rays:
     depth_max: 10.0
     surface_margin: 0.08
     sigma_s: 0.06
-batch_size: 204800
+batch_size: 409600
 lr: 0.005
 grad_method: finite_difference
 finite_difference_eps: 0.03
@@ -83,3 +83,4 @@ mesh_iso_value: 0.0
 clean_mesh: true
 ckpt_interval: -1
 profiling: false
+profiling_verbose: false

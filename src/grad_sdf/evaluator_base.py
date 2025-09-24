@@ -1,6 +1,5 @@
 import os
-from functools import reduce
-from typing import Callable, Dict, List
+from typing import Callable, Dict, List, Optional
 
 import trimesh
 from scipy.spatial import cKDTree
@@ -175,13 +174,50 @@ class EvaluatorBase:
         return metrics
 
     @torch.no_grad()
-    def extract_sdf_grid(self, bound_min: List[float], bound_max: List[float], grid_resolution: float):
+    def extract_sdf_grid(
+        self,
+        bound_min: List[float],
+        bound_max: List[float],
+        grid_resolution: float,
+        grid_vertex_filter: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    ):
+        """
+        Extract SDF grid from the model.
+        Args:
+            bound_min: Minimum bound of the 3D grid (list of 3 floats)
+            bound_max: Maximum bound of the 3D grid (list of 3 floats)
+            grid_resolution: Resolution of the grid (float)
+            grid_vertex_filter: Optional function to filter grid vertices, takes (N, 3) tensor of vertex coordinates,
+                                returns a mask of shape (N,) indicating whether to keep the vertex or not.
+        Returns:
+            dict with keys:
+                grid_bound: (2, 3) tensor of boundary min and max
+                grid_shape: (3, ) tensor of grid shape (nx, ny, nz)
+                grid_resolution: (1, ) tensor of grid resolution
+                mask: (nx, ny, nz) boolean tensor, where True indicates the vertex is valid. None if no filter is applied.
+                sdf_prior: (nx, ny, nz) tensor of SDF prior values on the grid
+                sdf_residual: (nx, ny, nz) tensor of SDF residual values on the grid
+                sdf: (nx, ny, nz) tensor of final SDF values on the grid
+        """
         x = torch.arange(bound_min[0], bound_max[0], grid_resolution)
         y = torch.arange(bound_min[1], bound_max[1], grid_resolution)
         z = torch.arange(bound_min[2], bound_max[2], grid_resolution)
-        grid_points = torch.stack(torch.meshgrid(x, y, z, indexing="ij"), dim=-1)
-        results = self.model_forward_func(self.model, grid_points.to(self.device), False, True, 0.0)
+        grid_points = torch.stack(torch.meshgrid(x, y, z, indexing="ij"), dim=-1).to(self.device)
+
+        mask = None
+        if grid_vertex_filter is not None:
+            mask = grid_vertex_filter(grid_points)  # (nx, ny, nz) boolean mask
+            results = self.model_forward_func(self.model, grid_points[mask], False, True, 0.0)
+            # prediction has shape (n_valid, )
+        else:
+            results = self.model_forward_func(self.model, grid_points, False, True, 0.0)
+            # prediction has shape (nx, ny, nz)
+
         results["grid_bound"] = torch.tensor([bound_min, bound_max])
+        results["grid_shape"] = torch.tensor(grid_points.shape[:-1], dtype=torch.long)
+        results["grid_resolution"] = torch.tensor(grid_resolution)
+        results["mask"] = mask  # type: ignore
+
         return results
 
     @torch.no_grad()
@@ -191,8 +227,8 @@ class EvaluatorBase:
         bound_max: List[float],
         grid_resolution: float,
         fields: List[str],
-        iso_value: float = 0.0,
-        voxel_filter: Callable[[torch.Tensor, torch.Tensor], List[int]] | None = None,
+        iso_value: float,
+        grid_vertex_filter: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     ):
         """
         Extract mesh from the model using marching cubes.
@@ -202,53 +238,58 @@ class EvaluatorBase:
             grid_resolution: Resolution of the grid (float)
             fields: List of fields to extract
             iso_value: Iso value for marching cubes (float)
-            voxel_filter: Optional callable to filter valid voxels before mesh extraction.
-                          It takes a (N, 3) tensor of voxel coordinates and a (X, Y, Z) tensor of voxel indices for
-                          each grid point, and returns a filtered list of valid voxel indices.
+            grid_vertex_filter: Optional function to filter grid vertices, takes (N, 3) tensor of vertex coordinates,
+                                returns a mask of shape (N,) indicating whether to keep the vertex or not.
         Returns:
             list of open3d.geometry.TriangleMesh: Extracted mesh
         """
 
         self.model.eval()
 
-        sdf_grid = self.extract_sdf_grid(bound_min, bound_max, grid_resolution)
+        sdf_grid = self.extract_sdf_grid(
+            bound_min=bound_min,
+            bound_max=bound_max,
+            grid_resolution=grid_resolution,
+            grid_vertex_filter=grid_vertex_filter,
+        )
+
+        mask = None
+        if grid_vertex_filter is not None:
+            mask = sdf_grid["mask"].cpu().numpy().astype(np.bool_)
 
         meshes: List[o3d.geometry.TriangleMesh] = []
         for field in fields:
             assert field in sdf_grid, f"Field {field} not found in model output"
             values = sdf_grid[field].cpu().numpy().astype(np.float64)
             mc = MarchingCubes()
-            valid_voxels = mc.collect_valid_cubes(
-                grid_shape=values.shape,
-                grid_values=values.flatten(),
-                iso_value=iso_value,
-                row_major=True,
-                parallel=True,
-            )
-            # convert list of list to a single list
-            valid_voxels = reduce(lambda x, y: x + y, valid_voxels)
 
-            if voxel_filter is not None and len(valid_voxels) > 0:
-                voxel_coords = torch.tensor(np.stack([voxel.coords for voxel in valid_voxels], axis=0))
-                voxel_coords = voxel_coords.long().to(self.device)
-                valid_voxels = [valid_voxels[i] for i in voxel_filter(voxel_coords, sdf_grid["voxel_indices"])]
+            if mask is None:
+                grid_values = values  # (nx, ny, nz)
+            else:
+                grid_shape = sdf_grid["grid_shape"].cpu().numpy().astype(np.int32)
+                grid_values = np.zeros(grid_shape, dtype=np.float64)
+                grid_values[mask] = values  # (nx, ny, nz)
 
-            vertices, triangles, face_normals = mc.process_valid_cubes(
-                valid_cubes=[valid_voxels],
+            vertices, triangles, triangle_normals = mc.run(
                 coords_min=bound_min,
                 grid_res=[grid_resolution, grid_resolution, grid_resolution],
-                grid_shape=values.shape,
-                grid_values=values.flatten(),
+                grid_shape=grid_values.shape,
+                grid_values=grid_values.flatten(),
+                mask=mask.flatten() if mask is not None else None,
                 iso_value=iso_value,
                 row_major=True,
                 parallel=True,
             )
+
+            # vertices: (3, n_vertices)
+            # triangles: (3, n_faces)
+            # triangle_normals: (3, n_faces)
 
             # save mesh
             mesh = o3d.geometry.TriangleMesh()
-            mesh.vertices = o3d.utility.Vector3dVector(vertices)
-            mesh.triangles = o3d.utility.Vector3iVector(triangles)
-            mesh.triangle_normals = o3d.utility.Vector3dVector(face_normals)
+            mesh.vertices = o3d.utility.Vector3dVector(vertices.T)
+            mesh.triangles = o3d.utility.Vector3iVector(triangles.T)
+            mesh.triangle_normals = o3d.utility.Vector3dVector(triangle_normals.T)
 
             meshes.append(mesh)
 

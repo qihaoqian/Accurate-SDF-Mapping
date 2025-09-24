@@ -99,7 +99,11 @@ class GuiTrainer:
 
             data_packet = GuiDataPacket()
             data_packet.mapping_end = True
-            self.reply_gui(data_packet, must_reply=True)
+            try:
+                self.reply_gui(data_packet, must_reply=True)
+            except Exception as e:
+                tqdm.write(f"[After Training] Error in reply_gui: {e}")
+                break
 
         tqdm.write("[After Training] GUI closed. Exiting...")
 
@@ -126,7 +130,10 @@ class GuiTrainer:
             return
         if self.queue_from_gui.empty():
             if data_packet is not None and must_reply:
-                self.queue_to_gui.put_nowait(data_packet)
+                try:
+                    self.queue_to_gui.put_nowait(data_packet)
+                except Exception as e:
+                    tqdm.write(f"[Training] Error in sending data to GUI: {e}")
             return
 
         while True:
@@ -143,15 +150,11 @@ class GuiTrainer:
             send_reply = must_reply
 
             # send octree if requested
-            current_time = time.time()
             if (
                 self.control_packet.octree_update_frequency > 0
-                and current_time - self.last_octree_time > 1.0 / self.control_packet.octree_update_frequency
+                and time.time() - self.last_octree_time > 1.0 / self.control_packet.octree_update_frequency
                 and (self.control_packet.octree_min_size != self.last_octree_min_size or not self.mapping_end)
             ):
-                self.last_octree_time = current_time
-                self.last_octree_min_size = self.control_packet.octree_min_size
-
                 mask1 = self.trainer.model.octree.voxels[:, -1] >= self.last_octree_min_size  # get valid voxels only
                 mask2 = ~torch.all(self.trainer.model.octree.structure[:, :8] >= 0, dim=1)  # nodes without all children
                 mask = mask1 & mask2
@@ -164,12 +167,15 @@ class GuiTrainer:
                 data_packet.octree_vertices = self.trainer.model.octree.vertex_indices[mask].cpu().numpy()
                 data_packet.octree_little_endian_vertex_order = self.trainer.model.octree.little_endian_vertex_order
                 data_packet.octree_resolution = self.trainer.model.octree.cfg.resolution
+                send_reply = True
+
+                self.last_octree_time = time.time()
+                self.last_octree_min_size = self.control_packet.octree_min_size
 
             # send SDF slice if requested
-            current_time = time.time()
             if (
                 self.control_packet.sdf_slice_frequency > 0
-                and current_time - self.last_sdf_slice_time > 1.0 / self.control_packet.sdf_slice_frequency
+                and time.time() - self.last_sdf_slice_time > 1.0 / self.control_packet.sdf_slice_frequency
                 and (
                     self.control_packet.sdf_slice_axis != self.last_sdf_slice_axis
                     or self.control_packet.sdf_slice_position != self.last_sdf_slice_position
@@ -177,11 +183,6 @@ class GuiTrainer:
                     or not self.mapping_end
                 )
             ):
-                self.last_sdf_slice_time = current_time
-                self.last_sdf_slice_axis = self.control_packet.sdf_slice_axis
-                self.last_sdf_slice_position = self.control_packet.sdf_slice_position
-                self.last_sdf_slice_resolution = self.control_packet.sdf_slice_resolution
-
                 results = self.trainer.evaluater.extract_slice(
                     axis=self.control_packet.sdf_slice_axis,
                     pos=self.control_packet.sdf_slice_position,
@@ -200,20 +201,27 @@ class GuiTrainer:
                 )
                 send_reply = True
 
+                self.last_sdf_slice_time = time.time()
+                self.last_sdf_slice_axis = self.control_packet.sdf_slice_axis
+                self.last_sdf_slice_position = self.control_packet.sdf_slice_position
+                self.last_sdf_slice_resolution = self.control_packet.sdf_slice_resolution
+
             # send SDF grid if requested
-            current_time = time.time()
             if (
                 self.control_packet.sdf_grid_frequency > 0
-                and current_time - self.last_sdf_grid_time > 1.0 / self.control_packet.sdf_grid_frequency
+                and self.trainer.global_step > 0
+                and time.time() - self.last_sdf_grid_time > 1.0 / self.control_packet.sdf_grid_frequency
                 and (self.control_packet.sdf_grid_resolution != self.last_sdf_grid_resolution or not self.mapping_end)
             ):
-                self.last_sdf_grid_time = current_time
-                self.last_sdf_grid_resolution = self.control_packet.sdf_grid_resolution
-
                 results = self.trainer.evaluater.extract_sdf_grid(
                     bound_min=self.gui_cfg.scene_bound_min,
                     bound_max=self.gui_cfg.scene_bound_max,
                     grid_resolution=self.control_packet.sdf_grid_resolution,
+                    grid_vertex_filter=(
+                        self.trainer.model.grid_vertex_filter
+                        if self.control_packet.sdf_grid_ignore_large_voxels
+                        else None
+                    ),
                 )
                 data_packet.sdf_grid_bounds = results["grid_bound"].cpu().tolist()
                 data_packet.sdf_grid_resolution = self.control_packet.sdf_grid_resolution
@@ -222,7 +230,13 @@ class GuiTrainer:
                     sdf_prior=results["sdf_prior"].cpu().numpy(),
                     sdf=results["sdf"].cpu().numpy(),
                 )
+                mask = results["mask"]
+                data_packet.sdf_grid_mask = mask.cpu().numpy() if mask is not None else None
+                data_packet.sdf_grid_shape = results["grid_shape"].cpu().numpy()
                 send_reply = True
+
+                self.last_sdf_grid_time = time.time()
+                self.last_sdf_grid_resolution = self.control_packet.sdf_grid_resolution
 
             # save model if requested
             model_path = self.control_packet.save_model_to_path
@@ -233,29 +247,88 @@ class GuiTrainer:
                 send_reply = True
 
             if send_reply:
-                self.queue_to_gui.put_nowait(data_packet)
+                try:
+                    self.queue_to_gui.put_nowait(data_packet)
+                except Exception as e:
+                    tqdm.write(f"[Training] Failed to send data to GUI queue: {e}")
                 data_packet = None  # only send once
 
             if self.control_packet.flag_mapping_run:
                 break  # continue mapping
+
+    def _send_flag_exit(self):
+        if self.queue_to_gui is None:
+            return
+        while not self.queue_to_gui.empty():
+            try:
+                self.queue_to_gui.get_nowait()
+            except queue.Empty:
+                break
+        try:
+            self.queue_to_gui.put_nowait(GuiDataPacket(flag_exit=True))
+        except Exception as e:
+            tqdm.write(f"[Training] Failed to send flag_exit to GUI queue: {e}")
 
     def run(self):
         self.gui_process.start()
         self.control_packet = self.queue_from_gui.get(block=True)  # wait for GUI to be ready
 
         try:
+            n_sec = 2
+            tqdm.write(f"[Training] Waiting for {n_sec} seconds before starting training...")
+            time.sleep(n_sec)
             self.trainer.train()
         except KeyboardInterrupt:
-            tqdm.write("KeyboardInterrupt detected. Stopping training...")
-            data_packet = GuiDataPacket()
-            data_packet.flag_exit = True
-            self.reply_gui(data_packet, must_reply=True)
+            tqdm.write("[Training] KeyboardInterrupt detected. Stopping training...")
+            self._send_flag_exit()
+        except Exception as e:
+            tqdm.write(f"[Training] Exception during training: {e}")
+            self._send_flag_exit()
+            raise e
         finally:
-            if self.thread_after_training_end.is_alive():
-                tqdm.write("Waiting for after-training thread to finish...")
-                self.thread_after_training_end.join()
-            tqdm.write("Waiting for GUI to close...")
-            self.gui_process.join()
+            # if self.thread_after_training_end.is_alive():
+            #     tqdm.write("[Training] Waiting for after-training thread to finish...")
+            #     self.thread_after_training_end.join()
+
+            tqdm.write("[Training] Waiting for GUI process to exit ...")
+            self.gui_process.join(timeout=10.0)
+            if self.gui_process.is_alive():
+                tqdm.write("[Training] GUI process didn't exit gracefully, terminating...")
+                self.gui_process.terminate()
+                self.gui_process.join(timeout=5.0)
+                if self.gui_process.is_alive():
+                    tqdm.write("[Training] Force killing GUI process...")
+                    self.gui_process.kill()
+                    self.gui_process.join(timeout=1.0)
+
+            tqdm.write("[Training] GUI process exited.")
+
+            # Cleanup queues
+            # Note: this is very important because each mp.Queue creates a background thread,
+            # which may block the program from exiting when the queue is not empty and no process
+            # is consuming from it.
+            while not self.queue_from_gui.empty():
+                try:
+                    self.queue_from_gui.get_nowait()
+                except queue.Empty:
+                    break
+            while not self.queue_to_gui.empty():
+                try:
+                    self.queue_to_gui.get_nowait()
+                except queue.Empty:
+                    break
+
+            # Close queues safely
+            try:
+                self.queue_from_gui.close()
+                self.queue_to_gui.close()
+                self.queue_from_gui.join_thread()
+                self.queue_to_gui.join_thread()
+            except Exception as e:
+                tqdm.write(f"[Training] Exception while closing queues: {e}")
+            self.queue_from_gui = None
+            self.queue_to_gui = None
+            tqdm.write("[Training] Done.")
 
 
 def main():
@@ -291,13 +364,16 @@ def main():
         offset = trainer_cfg.data.dataset_args.get("offset", None)
         if offset is not None:
             gui_cfg.gt_mesh_offset = offset
-            tqdm.write(f"Applied offset {offset} to GT mesh in GUI.")
+            tqdm.write(f"[Training] Applied offset {offset} to GT mesh in GUI.")
     if args.copy_scene_bound_to_gui:
         trainer_bound_min = trainer_cfg.model.residual_net_cfg.bound_min
         trainer_bound_max = trainer_cfg.model.residual_net_cfg.bound_max
         gui_cfg.scene_bound_min = trainer_bound_min
         gui_cfg.scene_bound_max = trainer_bound_max
-        tqdm.write(f"Copied scene bounds from trainer config to GUI config: {trainer_bound_min}, {trainer_bound_max}")
+        tqdm.write(
+            f"[Training] Copied scene bounds from trainer config to GUI config: {trainer_bound_min},"
+            f" {trainer_bound_max}"
+        )
 
     gui_trainer = GuiTrainer(gui_cfg, trainer_cfg)
     gui_trainer.run()

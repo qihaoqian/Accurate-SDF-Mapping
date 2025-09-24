@@ -37,3 +37,4 @@ class TrainerConfig(ConfigABC):
     slice_center: Optional[list] = None  # if None, use the center of the scene bounding box
     ckpt_interval: int = -1  # interval to save checkpoints, -1 means no intermediate checkpoints
     profiling: bool = False
+    profiling_verbose: bool = False

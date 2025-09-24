@@ -6,10 +6,11 @@ from tqdm import tqdm
 
 class CpuTimer:
 
-    def __init__(self, message, warmup: int = 0, enable: bool = True):
+    def __init__(self, message, warmup: int = 0, enable: bool = True, verbose: bool = True):
         self.message = message
         self.warmup = warmup
         self.enable = enable
+        self.verbose = verbose
         self.cnt = 0
         self.t = 0
         self.average_t = 0
@@ -32,13 +33,14 @@ class CpuTimer:
         self._total_t += self.t
         self.average_t = self._total_t / (self.cnt - self.warmup)
         self.total_t = self.average_t * self.cnt
-        tqdm.write(f"{self.message}: {self.t:.6f}(cur)/{self.average_t:.6f}(avg)/{self.total_t:.6f}(total) seconds")
+        if self.verbose:
+            tqdm.write(f"{self.message}: {self.t:.6f}(cur)/{self.average_t:.6f}(avg)/{self.total_t:.6f}(total) seconds")
 
 
-def cpu_timer(message, warmup=0, enable=True):
+def cpu_timer(message, warmup=0, enable=True, verbose=True):
     def decorator(func):
         def wrapper(*args, **kwargs):
-            with CpuTimer(message, warmup=warmup, enable=enable):
+            with CpuTimer(message, warmup=warmup, enable=enable, verbose=verbose):
                 return func(*args, **kwargs)
 
         return wrapper
@@ -48,10 +50,11 @@ def cpu_timer(message, warmup=0, enable=True):
 
 class GpuTimer:
 
-    def __init__(self, message, warmup: int = 0, enable: bool = True):
+    def __init__(self, message, warmup: int = 0, enable: bool = True, verbose: bool = True):
         self.message = message
         self.warmup = warmup
         self.enable = enable
+        self.verbose = verbose
         self.cnt = 0
         self.t = 0
         self.average_t = 0
@@ -79,13 +82,14 @@ class GpuTimer:
         self._total_t += self.t
         self.average_t = self._total_t / (self.cnt - self.warmup)
         self.total_t = self.average_t * self.cnt
-        tqdm.write(f"{self.message}: {self.t:.6f}(cur)/{self.average_t:.6f}(avg)/{self.total_t:.6f}(total) seconds")
+        if self.verbose:
+            tqdm.write(f"{self.message}: {self.t:.6f}(cur)/{self.average_t:.6f}(avg)/{self.total_t:.6f}(total) seconds")
 
 
-def gpu_timer(message, warmup=0, enable=True):
+def gpu_timer(message, warmup=0, enable=True, verbose=True):
     def decorator(func):
         def wrapper(*args, **kwargs):
-            with GpuTimer(message, warmup=warmup, enable=enable):
+            with GpuTimer(message, warmup=warmup, enable=enable, verbose=verbose):
                 return func(*args, **kwargs)
 
         return wrapper

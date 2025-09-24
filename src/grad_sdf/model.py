@@ -2,12 +2,11 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-from tqdm import tqdm
+from octree_config import OctreeConfig
+from semi_sparse_octree_v1 import SemiSparseOctree
 
 from grad_sdf.residual_net import ResidualNet, ResidualNetConfig
 from grad_sdf.utils.config_abc import ConfigABC
-from octree_config import OctreeConfig
-from semi_sparse_octree_v1 import SemiSparseOctree
 
 
 @dataclass
@@ -49,42 +48,41 @@ class SdfNetwork(nn.Module):
 
         return voxel_indices, sdf_prior, sdf_residual, sdf_prior + sdf_residual
 
-    def voxel_filter_by_size(
+    def grid_vertex_filter(
         self,
-        voxel_coords: torch.Tensor,
-        grid_voxel_indices: torch.Tensor,
-        min_size: int = 1,
-        max_size: int = 2,
-    ) -> list:
+        grid_points: torch.Tensor,
+        min_voxel_size: int = 1,
+        max_voxel_size: int = 2,
+        dilation_iters: int = 1,
+    ) -> torch.Tensor:
         """
-        Filter voxels based on their voxel sizes.
+        Filter out grid vertices that are in voxels that are too big.
         Args:
-            voxel_coords: (N, 3) tensor of voxel coordinates
-            grid_voxel_indices: (X, Y, Z) tensor of voxel indices for each grid point
-            min_size: minimum voxel size to keep
-            max_size: maximum voxel size to keep
+            grid_points: (nx, ny, nz, 3) grid points in world coordinates
+            min_voxel_size: minimum voxel size to keep
+            max_voxel_size: maximum voxel size to keep
+            dilation_iters: number of dilation iterations to fill small holes
         Returns:
-            indices of valid voxels
+            (nx, ny, nz) boolean mask, True if the vertex is valid (in a voxel that is not too big)
         """
-        voxel_vertex_offsets = torch.tensor(  # (8, 3)
-            [
-                [0, 0, 0],
-                [1, 0, 0],
-                [1, 1, 0],
-                [0, 1, 0],
-                [0, 0, 1],
-                [1, 0, 1],
-                [1, 1, 1],
-                [0, 1, 1],
-            ],
-            dtype=torch.long,
-            device=voxel_coords.device,
-        )
+        assert grid_points.ndim == 4 and grid_points.shape[-1] == 3
 
-        vertex_coords = voxel_coords.view(-1, 1, 3) + voxel_vertex_offsets.view(1, 8, 3)  # (n_valid, 8, 3)
-        vertex_indices = grid_voxel_indices[
-            vertex_coords[..., 0].flatten(), vertex_coords[..., 1].flatten(), vertex_coords[..., 2].flatten()
-        ].reshape(-1, 8)
-        voxel_sizes = self.octree.get_voxel_discrete_size(vertex_indices)
-        valid_mask = torch.any((voxel_sizes >= min_size) & (voxel_sizes <= max_size), dim=1)  # (n_valid, )
-        return torch.nonzero(valid_mask, as_tuple=False).cpu().flatten().tolist()
+        indices = self.octree.find_voxel_indices(grid_points.view(-1, 3)).view(grid_points.shape[:-1])
+        voxel_sizes = self.octree.get_voxel_discrete_size(indices)
+        valid_mask = (voxel_sizes >= min_voxel_size) & (voxel_sizes <= max_voxel_size)  # (nx, ny, nz)
+
+        # run a dilation to fill small holes: if any vertex is valid, we should keep the cube
+        # such that we need to mark all 8 vertices as valid.
+        # use convolution with all-ones kernel
+        kernel = torch.ones((3, 3, 3), dtype=torch.float32, device=valid_mask.device).view(1, 1, 3, 3, 3)
+        for _ in range(dilation_iters):
+            valid_mask = (  # (nx, ny, nz)
+                torch.nn.functional.conv3d(
+                    input=valid_mask.view(1, 1, *valid_mask.shape).to(torch.float32),
+                    weight=kernel,
+                    padding=1,
+                ).view(*valid_mask.shape)
+                >= 1
+            ).to(torch.bool)
+
+        return valid_mask

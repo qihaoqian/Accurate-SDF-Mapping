@@ -5,7 +5,6 @@ import threading
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from multiprocessing import Queue
 from typing import Optional
 
 import cv2
@@ -22,6 +21,8 @@ from grad_sdf.utils.profiling import CpuTimer
 
 @dataclass
 class GuiBaseConfig(ConfigABC):
+    scene_width: int = 2560
+    scene_height: int = 1440
     panel_split_ratio: float = 0.7
 
     view_option: str = "follow"  # follow, keyboard, from_file
@@ -48,6 +49,7 @@ class GuiBaseConfig(ConfigABC):
 
     mesh_update_freq: int = 10
     mesh_resolution: int = 100
+    mesh_clean: bool = True  # extract mesh only when a surface is likely present
     mesh_height_color_map: str = "jet"
     mesh_color_option: str = "normal"  # normal, height
 
@@ -66,6 +68,12 @@ class GuiBaseConfig(ConfigABC):
 
     mesh_remove_ceiling: bool = True
     mesh_ceiling_thickness: float = 0.2
+
+    save_video_path: Optional[str] = None
+    video_fps: int = 30
+    video_codec: str = "mp4v"  # Alternative: "XVID", "MJPG"
+    video_auto_record: bool = False
+    video_auto_end: bool = False  # if True, end the video when mapping ends
 
 
 @dataclass
@@ -87,6 +95,7 @@ class GuiControlPacket:
 
     sdf_grid_frequency: int = -1
     sdf_grid_resolution: float = -1
+    sdf_grid_ignore_large_voxels: bool = True
 
     save_model_to_path: Optional[str] = None  # if not None, save the model to this path
 
@@ -123,6 +132,8 @@ class GuiDataPacket:
 
     sdf_grid_bounds: Optional[list] = None  # (bound_min, bound_max)
     sdf_grid_resolution: Optional[float] = None  # voxel size in meters
+    sdf_grid_mask: Optional[np.ndarray] = None  # (X, Y, Z) boolean mask of valid grid vertices
+    sdf_grid_shape: Optional[list] = None  # (3, ) shape of the grid
     sdf_grid: Optional[dict[str, np.ndarray]] = None  # str -> (X, Y, Z) array of SDF values in a grid
 
     model_saved_path: Optional[str] = None  # path where the model is saved
@@ -137,7 +148,9 @@ class MarchingCubesTask:
     name: str
     coords_min: list
     grid_res: list
+    grid_shape: np.ndarray
     grid_values: np.ndarray
+    grid_mask: Optional[np.ndarray]
 
 
 @dataclass
@@ -148,27 +161,48 @@ class MarchingCubesResult:
     triangle_normals: np.ndarray
 
 
-def marching_cubes_process(queue_in: Queue, queue_out: Queue):
+def marching_cubes_process(queue_in: mp.Queue, queue_out: mp.Queue):
     tqdm.write("[Marching Cubes] Marching cubes process started.")
     mc = MarchingCubes()
     while True:
-        task: MarchingCubesTask = queue_in.get()
+        try:
+            task: MarchingCubesTask = queue_in.get(timeout=0.5)  # Reduced timeout for faster response
+        except queue.Empty:
+            continue
         if task is None:
+            tqdm.write("[Marching Cubes] Received termination signal.")
             break
-        vertices, triangles, triangle_normals = mc.run(
-            coords_min=task.coords_min,
-            grid_res=task.grid_res,
-            grid_shape=task.grid_values.shape,
-            grid_values=task.grid_values.flatten(),
-            iso_value=0.0,
-            row_major=True,
-            parallel=True,
-        )
+        mask = task.grid_mask
+        if mask is None:
+            grid_values = task.grid_values.flatten()
+        else:
+            grid_values = np.zeros(mask.shape, dtype=np.float64)
+            mask = mask.astype(bool)
+            grid_values[mask] = task.grid_values
+            mask = mask.flatten()
+            grid_values = grid_values.flatten()
+
+        try:
+            vertices, triangles, triangle_normals = mc.run(
+                coords_min=task.coords_min,
+                grid_res=task.grid_res,
+                grid_shape=task.grid_shape,
+                grid_values=grid_values,
+                mask=mask,
+                iso_value=0.0,
+                row_major=True,
+                parallel=True,
+            )
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            tqdm.write(f"[Marching Cubes] Exception in marching cubes process: {e}")
+            continue
         result = MarchingCubesResult(
             name=task.name,
-            vertices=np.array(vertices).astype(np.float64),
-            triangles=np.array(triangles).astype(np.int32),
-            triangle_normals=np.array(triangle_normals).astype(np.float64),
+            vertices=np.array(vertices.T).astype(np.float64),
+            triangles=np.array(triangles.T).astype(np.int32),
+            triangle_normals=np.array(triangle_normals.T).astype(np.float64),
         )
         queue_out.put_nowait(result)
     tqdm.write("[Marching Cubes] Exiting marching cubes process.")
@@ -264,7 +298,7 @@ class OctreeLinesetResult:
     lines: np.ndarray
 
 
-def octree_lineset_process(queue_in: Queue, queue_out: Queue):
+def octree_lineset_process(queue_in: mp.Queue, queue_out: mp.Queue):
     cut = np.array([-0.5, 0.5], dtype=np.float32)
     xx, yy, zz = np.meshgrid(cut, cut, cut, indexing="ij")  # big-endian
     octree_vertex_offsets = np.stack([xx, yy, zz], axis=-1).reshape(1, 8, 3)  # (1,8,3)
@@ -294,7 +328,10 @@ def octree_lineset_process(queue_in: Queue, queue_out: Queue):
     tqdm.write("[Octree Lineset] Octree lineset process started.")
 
     while True:
-        task: OctreeLinesetTask = queue_in.get()
+        try:
+            task: OctreeLinesetTask = queue_in.get(timeout=0.5)
+        except queue.Empty:
+            continue
         if task is None:
             break
         vertex_offsets = octree_vertex_offsets[1 if task.little_endian_vertex_order else 0]
@@ -318,9 +355,75 @@ def octree_lineset_process(queue_in: Queue, queue_out: Queue):
     tqdm.write("[Octree Lineset] Exiting octree lineset process.")
 
 
+@dataclass
+class VideoFrame:
+    flag_start: bool = False
+    flag_end: bool = False
+    path: Optional[str] = None
+    fps: int = 30
+    frame_size: Optional[tuple] = None  # (width, height)
+    frame: Optional[np.ndarray] = None
+
+
+def video_writer_process(queue_in: mp.Queue, queue_out: mp.Queue):
+    tqdm.write("[Video Writer] Video writer process started.")
+
+    video_writer = None
+    video_path = None
+
+    def init_video_writer(path, fps, frame_size):
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # You can choose other codecs
+        writer = cv2.VideoWriter(path, fourcc, fps, frame_size)
+        if not writer.isOpened():
+            return None
+        tqdm.write(f"[Video Writer] Video writer initialized for {path} at {fps} FPS and size {frame_size}.")
+        return writer
+
+    def write_frame(writer, frame):
+        if writer is not None and frame is not None:
+            writer.write(frame)
+
+    def close_video_writer(writer):
+        if writer is not None:
+            writer.release()
+            tqdm.write(f"[Video Writer] Video writer closed.")
+
+    while True:
+        try:
+            task: VideoFrame = queue_in.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        if task is None:
+            close_video_writer(video_writer)
+            video_writer = None
+            break
+        if task.flag_start:
+            if video_writer is not None:
+                close_video_writer(video_writer)
+            video_writer = init_video_writer(task.path, task.fps, task.frame_size)
+            if video_writer is None:
+                tqdm.write(f"[Video Writer] Failed to open video writer for {task.path}")
+                queue_out.put_nowait(None)
+            else:
+                tqdm.write(f"[Video Writer] Started recording video to {task.path}")
+                video_path = task.path
+                queue_out.put_nowait(task)  # Notify that recording has started
+        elif task.flag_end:
+            if video_writer is not None:
+                close_video_writer(video_writer)
+                tqdm.write(f"[Video Writer] Stopped recording video to {video_path}")
+                video_writer = None
+                video_path = None
+                queue_out.put_nowait(task)  # Notify that recording has stopped
+        else:
+            write_frame(video_writer, task.frame)
+
+    tqdm.write("[Video Writer] Exiting video writer process.")
+
+
 class GuiBase:
 
-    def __init__(self, cfg: GuiBaseConfig, queue_to_gui: Queue = None, queue_from_gui: Queue = None):
+    def __init__(self, cfg: GuiBaseConfig, queue_to_gui: mp.Queue = None, queue_from_gui: mp.Queue = None):
         o3d_gui.Application.instance.initialize()
 
         self.cfg = cfg
@@ -337,58 +440,47 @@ class GuiBase:
         self.frame_indices = []
         self.traj_length = 0
 
-        # cut = np.array([-0.5, 0.5], dtype=np.float32)
-        # xx, yy, zz = np.meshgrid(cut, cut, cut, indexing="ij")  # big-endian
-        # octree_vertex_offsets = np.stack([xx, yy, zz], axis=-1).reshape(1, 8, 3)  # (1,8,3)
-        # self.octree_vertex_offsets = [
-        #     octree_vertex_offsets,  # big-endian
-        #     octree_vertex_offsets[:, :, ::-1].copy(),  # little-endian
-        # ]
-        # self.octree_voxel_lines = np.array(
-        #     [
-        #         [0, 1],
-        #         [1, 3],
-        #         [3, 2],
-        #         [2, 0],
-        #         [0, 4],
-        #         [4, 5],
-        #         [5, 7],
-        #         [7, 6],
-        #         [6, 4],
-        #         [1, 5],
-        #         [2, 6],
-        #         [3, 7],
-        #     ],
-        #     dtype=np.int32,
-        # )
-
         self.camera_init = False
         self.view_file_loaded = False
         self.sdf_slice_to_save = None
 
+        self.timer_gui_update = CpuTimer(message="[GUI] Update", warmup=10, verbose=False)
+
+        self._cleanup_lock = threading.Lock()
+        self._cleaned = False
+
         self._init_widgets()
 
-        self.mc_queue_in = Queue()
-        self.mc_queue_out = Queue()
-        self.mc_process = mp.Process(target=marching_cubes_process, args=(self.mc_queue_in, self.mc_queue_out))
+        self.mc_queue_in = mp.Queue()
+        self.mc_queue_out = mp.Queue()
+        self.mc_process = mp.Process(
+            target=marching_cubes_process,
+            args=(self.mc_queue_in, self.mc_queue_out),
+        )
         self.mc_process.start()
 
-        self.octree_queue_in = Queue()
-        self.octree_queue_out = Queue()
+        self.octree_queue_in = mp.Queue()
+        self.octree_queue_out = mp.Queue()
         self.octree_process = mp.Process(
             target=octree_lineset_process, args=(self.octree_queue_in, self.octree_queue_out)
         )
         self.octree_process.start()
 
-        # self.update_barrier = threading.Lock()
-        self.timer_gui_update = CpuTimer("[GUI] Update")
+        self.video_queue_in = mp.Queue()
+        self.video_queue_out = mp.Queue()
+        self.video_writer_process = mp.Process(
+            target=video_writer_process, args=(self.video_queue_in, self.video_queue_out)
+        )
+        self.video_writer_process.start()
+        if self.cfg.save_video_path is not None and self.cfg.video_auto_record:
+            self._init_video_writer(self.cfg.save_video_path)
 
-        threading.Thread(target=self.communicate_thread).start()
-        # self.communicate_thread()
+        self.comm_thread = threading.Thread(target=self.communicate_thread)
+        self.comm_thread.start()
 
     def _init_widgets(self):
-        self.window_width = 2560
-        self.window_height = 1440
+        self.window_width = int(self.cfg.scene_width / self.cfg.panel_split_ratio)
+        self.window_height = self.cfg.scene_height
 
         self.window = o3d_gui.Application.instance.create_window("grad_sdf", self.window_width, self.window_height)
         self.window.set_on_layout(self._on_layout)
@@ -490,14 +582,15 @@ class GuiBase:
             if self.cfg.mesh_remove_ceiling:
                 self.remove_ceiling_from_mesh(self.gt_mesh)
         self.org_cam = o3d.geometry.LineSet()  # camera of identity pose
-        s = f = self.cfg.camera_size * self.window.scaling
+        sx = f = self.cfg.camera_size * self.window.scaling
+        sy = 0.5 * sx
         self.org_cam.points = o3d.utility.Vector3dVector(
             np.array(
                 [
-                    [-s, -s, f],
-                    [s, -s, f],
-                    [s, s, f],
-                    [-s, s, f],
+                    [-sx, -sy, f],
+                    [sx, -sy, f],
+                    [sx, sy, f],
+                    [-sx, sy, f],
                     [0, 0, 0],
                 ],
                 dtype=np.float64,
@@ -789,6 +882,20 @@ class GuiBase:
 
         self.panel.add_child(save_buttons_line)
 
+        # Add video recording buttons on a new line
+        video_buttons_line = o3d_gui.Horiz(spacing=0.5 * em, margins=o3d_gui.Margins(left=0.5 * em, top=0.5 * em))
+        self.button_start_video = o3d_gui.Button("Start Video Recording")
+        self.button_start_video.enabled = True
+        self.button_start_video.set_on_clicked(self._on_button_start_video_recording)
+        video_buttons_line.add_child(self.button_start_video)
+
+        self.button_stop_video = o3d_gui.Button("Stop Video Recording")
+        self.button_stop_video.set_on_clicked(self._on_button_stop_video_recording)
+        self.button_stop_video.enabled = False  # Disable if not recording
+        video_buttons_line.add_child(self.button_stop_video)
+
+        self.panel.add_child(video_buttons_line)
+
         # l. info tab
         tabs = o3d_gui.TabControl()
         tab_info = o3d_gui.Vert(spacing=0.5 * em, margins=o3d_gui.Margins(left=0.5 * em, top=0.5 * em))
@@ -830,10 +937,23 @@ class GuiBase:
             content_rect.height,
         )
 
+    def _send_flag_gui_closed(self):
+        if self.queue_out is None:
+            return
+        while not self.queue_out.empty():
+            try:
+                self.queue_out.get_nowait()
+            except queue.Empty:
+                break
+        try:
+            self.queue_out.put_nowait(GuiControlPacket(flag_gui_closed=True))
+        except Exception as e:
+            tqdm.write(f"[GUI] Error sending close signal: {e}")
+
     def _on_close(self):
         self.data_packet.flag_exit = True
         tqdm.write("[GUI] Window is being closed.")
-        self.queue_out.put_nowait(GuiControlPacket(flag_gui_closed=True))
+        self._send_flag_gui_closed()
         return True
 
     def _on_switch_run(self, is_on: bool) -> None:
@@ -881,6 +1001,8 @@ class GuiBase:
 
             def on_done(filename: str):
                 self.set_view_from_file(filename)
+                self.cfg.view_file = filename
+                self.view_file_loaded = True
                 self.window.close_dialog()
 
             dialog.set_on_done(on_done)
@@ -1111,6 +1233,81 @@ class GuiBase:
         dialog.set_on_cancel(lambda: self.window.close_dialog())
         self.window.show_dialog(dialog)
 
+    def _init_video_writer(self, path: str) -> bool:
+        """Initialize video writer with proper settings"""
+        if self.video_queue_in is None or self.video_queue_out is None:
+            return
+        try:
+            path = path.strip()
+            if not os.path.isabs(path):
+                path = os.path.abspath(path)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+
+            self.video_queue_in.put_nowait(
+                VideoFrame(
+                    flag_start=True,
+                    path=path,
+                    fps=self.cfg.video_fps,
+                    frame_size=(self.widget3d_width, self.widget3d_height),
+                )
+            )
+            ack = self.video_queue_out.get()
+            if ack is None:
+                tqdm.write("[GUI] Error: Video writer thread failed to start.")
+                self.button_start_video.enabled = True
+                self.button_stop_video.enabled = False
+            else:
+                tqdm.write(f"[GUI] Video writer initialized: {path}")
+                self.button_start_video.enabled = False
+                self.button_stop_video.enabled = True
+        except Exception as e:
+            tqdm.write(f"[GUI] Error initializing video writer: {e}")
+
+    def _capture_frame_to_video(self) -> None:
+        """Capture current frame and write to video"""
+        if self.video_queue_in is None or self.video_queue_out is None:
+            return
+        if self.button_start_video.enabled:
+            # Video recording is not active
+            return
+        try:
+            height = self.window.size.height
+            width = self.widget3d_width
+            app = o3d.visualization.gui.Application.instance
+            img = np.asarray(app.render_to_image(self.widget3d.scene, width, height))
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)  # Note: RGB to BGR for video
+
+            self.video_queue_in.put_nowait(VideoFrame(frame=img))
+        except Exception as e:
+            tqdm.write(f"[GUI] Error capturing frame to video: {e}")
+
+    def _close_video_writer(self) -> None:
+        """Release video writer resources"""
+        if self.video_queue_in is None or self.video_queue_out is None:
+            return
+        try:
+            self.video_queue_in.put_nowait(VideoFrame(flag_end=True))
+            # don't wait for ack here, as it may block the GUI
+        except Exception as e:
+            tqdm.write(f"[GUI] Error closing video writer: {e}")
+
+    def _on_button_start_video_recording(self) -> None:
+        dialog = o3d_gui.FileDialog(o3d_gui.FileDialog.SAVE, "Save Video As", self.window.theme)
+        dialog.set_path(os.path.join(os.curdir, "video.mp4"))
+
+        def on_done(path: str) -> None:
+            self.window.close_dialog()
+            self._init_video_writer(path)
+
+        dialog.set_on_done(on_done)
+        dialog.set_on_cancel(lambda: self.window.close_dialog())
+        self.window.show_dialog(dialog)
+
+    def _on_button_stop_video_recording(self) -> None:
+        self._close_video_writer()
+        self.button_start_video.enabled = True
+        self.button_stop_video.enabled = False
+
     def visualize_scan(self, points: np.ndarray = None):
         if points is not None:
             points = points[:: self.cfg.scan_point_downsample].copy()  # copy to make it contiguous
@@ -1212,13 +1409,15 @@ class GuiBase:
                 tqdm.write(f"[GUI] Warning: failed to get octree from queue: {e}")
                 break
 
-        if not self.switch_vis.is_on or self.octree.is_empty() or processed_octrees == 0:
+        if not self.switch_vis.is_on or self.octree.is_empty():
             return
 
         if self.checkbox_show_octree.checked:
-            if self.widget3d.scene.has_geometry(self.octree_name):
+            if self.widget3d.scene.has_geometry(self.octree_name) and processed_octrees > 0:
+                # already added but updated
                 self.widget3d.scene.remove_geometry(self.octree_name)
-            self.widget3d.scene.add_geometry(self.octree_name, self.octree, self.octree_render)
+            if not self.widget3d.scene.has_geometry(self.octree_name):
+                self.widget3d.scene.add_geometry(self.octree_name, self.octree, self.octree_render)
 
         self.widget3d.scene.show_geometry(self.octree_name, self.checkbox_show_octree.checked)
 
@@ -1300,15 +1499,12 @@ class GuiBase:
         vertices = np.asarray(mesh.vertices)
         faces = np.asarray(mesh.triangles)
         face_z_max = np.max(vertices[faces][:, :, 2], axis=1)
-        mask = face_z_max < z_max - ceiling_thickness
-        faces = faces[mask]
-        mesh.triangles = o3d.utility.Vector3iVector(faces)
-        if len(mesh.triangle_normals) > 0:
-            triangle_normals = np.asarray(mesh.triangle_normals)
-            mesh.triangle_normals = o3d.utility.Vector3dVector(triangle_normals[mask])
+        mask = face_z_max >= z_max - ceiling_thickness
+        mesh.remove_triangles_by_index(np.where(mask)[0].tolist())
 
     def visualize_mesh(self):
         processed_meshes = 0
+        processed_prior_meshes = 0
         max_meshes_per_call = 5  # Limit processing to prevent blocking
 
         while processed_meshes < max_meshes_per_call and not self.mc_queue_out.empty():
@@ -1320,6 +1516,7 @@ class GuiBase:
                     self.mesh.vertices = o3d.utility.Vector3dVector(mesh_data.vertices)
                     self.mesh.triangles = o3d.utility.Vector3iVector(mesh_data.triangles)
                     self.mesh.triangle_normals = o3d.utility.Vector3dVector(mesh_data.triangle_normals)
+                    self.mesh.remove_degenerate_triangles()
                     if self.cfg.mesh_remove_ceiling:
                         self.remove_ceiling_from_mesh(self.mesh)
                     self.colorize_mesh(self.mesh)
@@ -1327,9 +1524,11 @@ class GuiBase:
                     self.mesh_prior.vertices = o3d.utility.Vector3dVector(mesh_data.vertices)
                     self.mesh_prior.triangles = o3d.utility.Vector3iVector(mesh_data.triangles)
                     self.mesh_prior.triangle_normals = o3d.utility.Vector3dVector(mesh_data.triangle_normals)
+                    self.mesh_prior.remove_degenerate_triangles()
                     if self.cfg.mesh_remove_ceiling:
                         self.remove_ceiling_from_mesh(self.mesh_prior)
                     self.colorize_mesh(self.mesh_prior)
+                    processed_prior_meshes += 1
             except queue.Empty:
                 break
             except Exception as e:
@@ -1339,18 +1538,22 @@ class GuiBase:
         if not self.switch_vis.is_on:
             return
 
+        processed_meshes -= processed_prior_meshes
+
         if not self.mesh.is_empty():
             if self.checkbox_show_mesh.checked:
-                if self.widget3d.scene.has_geometry(self.mesh_name):
+                if self.widget3d.scene.has_geometry(self.mesh_name) and processed_meshes > 0:
                     self.widget3d.scene.remove_geometry(self.mesh_name)
-                self.widget3d.scene.add_geometry(self.mesh_name, self.mesh, self.mesh_render)
+                if not self.widget3d.scene.has_geometry(self.mesh_name):
+                    self.widget3d.scene.add_geometry(self.mesh_name, self.mesh, self.mesh_render)
             self.widget3d.scene.show_geometry(self.mesh_name, self.checkbox_show_mesh.checked)
 
         if not self.mesh_prior.is_empty():
             if self.checkbox_show_mesh_by_prior.checked:
-                if self.widget3d.scene.has_geometry(self.mesh_prior_name):
+                if self.widget3d.scene.has_geometry(self.mesh_prior_name) and processed_prior_meshes > 0:
                     self.widget3d.scene.remove_geometry(self.mesh_prior_name)
-                self.widget3d.scene.add_geometry(self.mesh_prior_name, self.mesh_prior, self.mesh_render)
+                if not self.widget3d.scene.has_geometry(self.mesh_prior_name):
+                    self.widget3d.scene.add_geometry(self.mesh_prior_name, self.mesh_prior, self.mesh_render)
             self.widget3d.scene.show_geometry(self.mesh_prior_name, self.checkbox_show_mesh_by_prior.checked)
 
     def visualize_gt_mesh(self):
@@ -1398,6 +1601,8 @@ class GuiBase:
         app.initialize()
         window = cls(*args, **kwargs)
         app.run()
+        window.cleanup()
+        app.quit()
 
     def send_control_packet(self):
         if self.queue_out is None:
@@ -1416,6 +1621,7 @@ class GuiBase:
             if self.checkbox_show_mesh.checked or self.checkbox_show_mesh_by_prior.checked:
                 packet.sdf_grid_frequency = self.slider_mesh_update_freq.int_value
                 packet.sdf_grid_resolution = 1.0 / self.slider_mesh_resolution.int_value
+                packet.sdf_grid_ignore_large_voxels = self.cfg.mesh_clean
             self.queue_out.put_nowait(packet)
         except Exception as e:
             tqdm.write(f"[GUI] Error sending control packet: {e}")
@@ -1435,7 +1641,7 @@ class GuiBase:
                 if packet.flag_exit:
                     tqdm.write("[GUI] Received exit signal. Closing GUI...")
                     self.data_packet.flag_exit = True
-                    self.queue_out.put_nowait(GuiControlPacket(flag_gui_closed=True))
+                    self._send_flag_gui_closed()
                     break
 
                 if packet.mapping_end:
@@ -1483,6 +1689,10 @@ class GuiBase:
                     self.data_packet.sdf_grid_bounds = packet.sdf_grid_bounds
                 if packet.sdf_grid_resolution is not None:
                     self.data_packet.sdf_grid_resolution = packet.sdf_grid_resolution
+                if packet.sdf_grid_mask is not None:
+                    self.data_packet.sdf_grid_mask = packet.sdf_grid_mask
+                if packet.sdf_grid_shape is not None:
+                    self.data_packet.sdf_grid_shape = packet.sdf_grid_shape
                 if packet.sdf_grid is not None:
                     self.data_packet.sdf_grid = packet.sdf_grid
 
@@ -1504,15 +1714,14 @@ class GuiBase:
                 break
         return packet
 
-    def update_wrapper(self):
+    def update_wrapper(self, data_packet: Optional[GuiDataPacket] = None):
         with self.timer_gui_update:
-            self.update()
+            self.update(data_packet)
 
-    def update(self):
-        data_packet = self.receive_data_packet(get_latest=True)
+    def update(self, data_packet: Optional[GuiDataPacket] = None):
         if self.data_packet.flag_exit:
             tqdm.write("[GUI] Received exit signal. Closing GUI...")
-            self.queue_out.put_nowait(GuiControlPacket(flag_gui_closed=True))
+            self._send_flag_gui_closed()
             return
 
         if data_packet is not None:
@@ -1520,6 +1729,12 @@ class GuiBase:
             # multiple data packets may be merged into one and stored in self.data_packet
             if self.data_packet.mapping_end:
                 self.sleep_interval = 0.1  # slow down
+
+                # auto-end video recording if a video is being recorded (the process will check.)
+                if self.cfg.video_auto_end:
+                    self._close_video_writer()
+                    self.button_start_video.enabled = True
+                    self.button_stop_video.enabled = False
 
             if self.data_packet.num_iterations >= 0:
                 self.label_info_num_iterations.text = f"Num Iterations: {self.data_packet.num_iterations}"
@@ -1634,10 +1849,13 @@ class GuiBase:
             if (
                 self.data_packet.sdf_grid_bounds is not None
                 or self.data_packet.sdf_grid_resolution is not None
+                or self.data_packet.sdf_grid_mask is not None
+                or self.data_packet.sdf_grid_shape is not None
                 or self.data_packet.sdf_grid is not None
             ):
                 assert self.data_packet.sdf_grid_bounds is not None
                 assert self.data_packet.sdf_grid_resolution is not None
+                assert self.data_packet.sdf_grid_shape is not None
                 assert self.data_packet.sdf_grid is not None
 
                 self.mc_queue_in.put_nowait(
@@ -1645,7 +1863,9 @@ class GuiBase:
                         name="sdf",
                         coords_min=self.data_packet.sdf_grid_bounds[0],
                         grid_res=[self.data_packet.sdf_grid_resolution] * 3,
+                        grid_shape=self.data_packet.sdf_grid_shape,
                         grid_values=self.data_packet.sdf_grid["sdf"],
+                        grid_mask=self.data_packet.sdf_grid_mask,
                     )
                 )
                 self.mc_queue_in.put_nowait(
@@ -1653,11 +1873,15 @@ class GuiBase:
                         name="sdf_prior",
                         coords_min=self.data_packet.sdf_grid_bounds[0],
                         grid_res=[self.data_packet.sdf_grid_resolution] * 3,
+                        grid_shape=self.data_packet.sdf_grid_shape,
                         grid_values=self.data_packet.sdf_grid["sdf_prior"],
+                        grid_mask=self.data_packet.sdf_grid_mask,
                     )
                 )
                 self.data_packet.sdf_grid_bounds = None  # reset
                 self.data_packet.sdf_grid_resolution = None  # reset
+                self.data_packet.sdf_grid_mask = None  # reset
+                self.data_packet.sdf_grid_shape = None  # reset
                 self.data_packet.sdf_grid = None  # reset
 
             self.visualize_mesh()  # update mesh visualization
@@ -1742,14 +1966,22 @@ class GuiBase:
 
         self.set_camera()
 
+        # Capture frame for video recording if active
+        if not self.button_start_video.enabled and self.switch_vis.is_on:
+            self._capture_frame_to_video()
+
         self.window.post_redraw()
 
-        # tqdm.write(f"[GUI] Finished update at {time.time()}")
-
-    def communicate_thread(self):
+    def communicate(self):
         debug_counter = 0  # Counter to reduce debug output frequency
         while True:
             time.sleep(self.sleep_interval)
+
+            # Check exit flag first
+            if self.data_packet.flag_exit:
+                tqdm.write("[GUI] Exiting communicate loop due to flag_exit.")
+                self._send_flag_gui_closed()
+                break  # exit thread
 
             # Only print debug message every 100 iterations (once per second at 10ms intervals)
             debug_counter += 1
@@ -1762,44 +1994,207 @@ class GuiBase:
                 self.send_control_packet()
                 self.last_control_packet_timestamp = current_time
 
-            if self.data_packet.flag_exit:
-                self.queue_out.put_nowait(GuiControlPacket(flag_gui_closed=True))
-                tqdm.write(s="[GUI] Exiting communicate thread...")
-
-                while not self.queue_in.empty():
-                    self.queue_in.get_nowait()
-                tqdm.write("[GUI] Cleaned up input queue.")
-                self.queue_in = None
-                self.queue_out = None
-
-                while not self.mc_queue_in.empty():
-                    self.mc_queue_in.get_nowait()
-                tqdm.write("[GUI] Cleaned up mc_queue_in.")
-                while not self.mc_queue_out.empty():
-                    self.mc_queue_out.get_nowait()
-                tqdm.write("[GUI] Cleaned up mc_queue_out.")
-                self.mc_process.terminate()
-                self.mc_process.join()
-                self.mc_queue_in = None
-                self.mc_queue_out = None
-                tqdm.write("[GUI] Terminated marching cubes process.")
-
-                while not self.octree_queue_in.empty():
-                    self.octree_queue_in.get_nowait()
-                tqdm.write("[GUI] Cleaned up octree_queue_in.")
-                while not self.octree_queue_out.empty():
-                    self.octree_queue_out.get_nowait()
-                tqdm.write("[GUI] Cleaned up octree_queue_out.")
-                self.octree_process.terminate()
-                self.octree_process.join()
-                self.octree_queue_in = None
-                self.octree_queue_out = None
-                tqdm.write("[GUI] Terminated octree process.")
-
-                o3d_gui.Application.instance.quit()
-                break  # exit thread
-
             try:
-                o3d_gui.Application.instance.post_to_main_thread(self.window, lambda: self.update_wrapper())
+                data_packet = self.receive_data_packet(get_latest=True)
+                if not self.data_packet.flag_exit:  # Don't post updates if exiting
+                    o3d_gui.Application.instance.post_to_main_thread(
+                        self.window, lambda: self.update_wrapper(data_packet)
+                    )
             except Exception as e:
                 tqdm.write(f"[GUI] Error posting to main thread: {e}")
+
+    def communicate_thread(self):
+        try:
+            self.communicate()
+        except Exception as e:
+            tqdm.write(f"[GUI] Communicate thread encountered an error: {e}")
+        tqdm.write("[GUI] Communicate thread exited.")
+
+    def _clean_up_marching_cube_process(self):
+        if self.mc_process is None:
+            return
+
+        # Clear input queue to unblock the process
+        while not self.mc_queue_in.empty():
+            try:
+                self.mc_queue_in.get_nowait()
+            except queue.Empty:
+                break
+        tqdm.write("[GUI] Cleaned up mc_queue_in.")
+
+        # Send termination signal
+        try:
+            self.mc_queue_in.put_nowait(None)
+        except Exception as e:
+            tqdm.write(f"[GUI] Error sending termination signal: {e}")
+
+        # Clear output queue
+        while not self.mc_queue_out.empty():
+            try:
+                self.mc_queue_out.get_nowait()
+            except queue.Empty:
+                break
+        tqdm.write("[GUI] Cleaned up mc_queue_out.")
+
+        # Wait for process to terminate with timeout
+        try:
+            self.mc_process.join(timeout=2.0)
+            if self.mc_process.is_alive():
+                tqdm.write("[GUI] Marching cubes process didn't exit gracefully, terminating...")
+                self.mc_process.terminate()
+                self.mc_process.join(timeout=1.0)
+                if self.mc_process.is_alive():
+                    tqdm.write("[GUI] Force killing marching cubes process...")
+                    self.mc_process.kill()
+        except Exception as e:
+            tqdm.write(f"[GUI] Error terminating marching cubes process: {e}")
+
+        # Cleanup resources
+        try:
+            self.mc_queue_in.close()
+            self.mc_queue_out.close()
+            self.mc_queue_in.join_thread()
+            self.mc_queue_out.join_thread()
+        except Exception as e:
+            tqdm.write(f"[GUI] Error closing marching cubes queues: {e}")
+
+        self.mc_queue_in = None
+        self.mc_queue_out = None
+        self.mc_process = None
+        tqdm.write("[GUI] Terminated marching cubes process.")
+
+    def _clean_up_octree_process(self):
+        if self.octree_process is None:
+            return
+
+        # Clear input queue to unblock the process
+        while not self.octree_queue_in.empty():
+            try:
+                self.octree_queue_in.get_nowait()
+            except queue.Empty:
+                break
+        tqdm.write("[GUI] Cleaned up octree_queue_in.")
+
+        # Send termination signal
+        try:
+            self.octree_queue_in.put_nowait(None)
+        except Exception as e:
+            tqdm.write(f"[GUI] Error sending termination signal: {e}")
+
+        # Clear output queue
+        while not self.octree_queue_out.empty():
+            try:
+                self.octree_queue_out.get_nowait()
+            except queue.Empty:
+                break
+        tqdm.write("[GUI] Cleaned up octree_queue_out.")
+
+        # Wait for process to terminate with timeout
+        try:
+            self.octree_process.join(timeout=2.0)
+            if self.octree_process.is_alive():
+                tqdm.write("[GUI] Octree process didn't exit gracefully, terminating...")
+                self.octree_process.terminate()
+                self.octree_process.join(timeout=1.0)
+                if self.octree_process.is_alive():
+                    tqdm.write("[GUI] Force killing octree process...")
+                    self.octree_process.kill()
+        except Exception as e:
+            tqdm.write(f"[GUI] Error terminating octree process: {e}")
+
+        # Cleanup resources
+        try:
+            self.octree_queue_in.close()
+            self.octree_queue_out.close()
+            self.octree_queue_in.join_thread()
+            self.octree_queue_out.join_thread()
+        except Exception as e:
+            tqdm.write(f"[GUI] Error closing octree queues: {e}")
+
+        self.octree_queue_in = None
+        self.octree_queue_out = None
+        self.octree_process = None
+        tqdm.write("[GUI] Terminated octree process.")
+
+    def _clean_up_video_writer_process(self):
+        if self.video_writer_process is None:
+            return
+
+        self._close_video_writer()  # Ensure video writer is closed properly
+
+        # Wait for process to terminate with timeout
+        try:
+            while self.video_writer_process.is_alive():  # Wait until it finishes processing
+                # Send termination signal
+                try:
+                    self.video_queue_in.put_nowait(None)
+                except Exception as e:
+                    tqdm.write(f"[GUI] Error sending termination signal to video writer: {e}")
+                    if self.video_writer_process.is_alive():
+                        self.video_writer_process.kill()  # Force kill if we can't send the signal
+                self.video_writer_process.join(timeout=2.0)
+        except Exception as e:
+            tqdm.write(f"[GUI] Error joining video writer process: {e}")
+            if self.video_writer_process.is_alive():
+                tqdm.write("[GUI] Video writer process didn't exit gracefully, terminating...")
+                self.video_writer_process.terminate()
+                self.video_writer_process.join(timeout=1.0)
+                if self.video_writer_process.is_alive():
+                    tqdm.write("[GUI] Force killing video writer process...")
+                    self.video_writer_process.kill()
+
+        # Cleanup queues
+        while not self.video_queue_in.empty():
+            try:
+                self.video_queue_in.get_nowait()
+            except queue.Empty:
+                break
+        tqdm.write("[GUI] Cleaned up video_queue_in.")
+        while not self.video_queue_out.empty():
+            try:
+                self.video_queue_out.get_nowait()
+            except queue.Empty:
+                break
+        tqdm.write("[GUI] Cleaned up video_queue_out.")
+
+        # Cleanup resources
+        try:
+            self.video_queue_in.close()
+            self.video_queue_out.close()
+            self.video_queue_in.join_thread()
+            self.video_queue_out.join_thread()
+        except Exception as e:
+            tqdm.write(f"[GUI] Error closing video writer queue: {e}")
+
+        self.video_queue_in = None
+        self.video_queue_out = None
+        self.video_writer_process = None
+        tqdm.write("[GUI] Terminated video writer process.")
+
+    def cleanup(self):
+        with self._cleanup_lock:
+            if self._cleaned:
+                return
+            self._cleaned = True  # Prevent re-entrance
+
+        tqdm.write("[GUI] Cleaning up resources...")
+
+        # Send final close signal
+        self._send_flag_gui_closed()
+
+        # Stop video recording and cleanup video writer
+
+        # Clean up processes
+        self._clean_up_marching_cube_process()
+        self._clean_up_octree_process()
+        self._clean_up_video_writer_process()
+
+        # Stop communicate thread
+        self.data_packet.flag_exit = True  # Signal thread to exit
+        self.comm_thread.join(timeout=2.0)
+        if self.comm_thread.is_alive():
+            tqdm.write("[GUI] Communicate thread didn't exit gracefully, terminating...")
+            # Note: Python threads cannot be forcefully killed; we rely on the flag_exit to stop it.
+            # If it doesn't stop, it will exit when the main program exits
+
+        tqdm.write("[GUI] Cleanup complete. Exiting now.")

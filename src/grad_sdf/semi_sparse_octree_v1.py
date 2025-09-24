@@ -38,6 +38,18 @@ class SemiSparseOctree(torch.nn.Module):
         self.structure: torch.Tensor  # (N, 9) [children(8), voxel_size]
 
     @torch.no_grad()
+    def points_to_voxels(self, points: torch.Tensor):
+        """
+        Converts points to voxel coordinates.
+        Args:
+            points: (..., 3) point cloud in world coordinates
+        Returns:
+            voxels: (..., 3) voxel coordinates
+        """
+        voxels = torch.div(points, self.cfg.resolution, rounding_mode="floor").long()  # Divides each element
+        return voxels
+
+    @torch.no_grad()
     def insert_points(self, points: torch.Tensor):
         """
         Inserts points into the octree.
@@ -47,7 +59,7 @@ class SemiSparseOctree(torch.nn.Module):
             voxels_unique: (n_unique, 3) unique voxel coordinates inserted
             svo_idx: (n_unique,) index of the voxel for each voxel
         """
-        voxels = torch.div(points, self.cfg.resolution, rounding_mode="floor").long()  # Divides each element
+        voxels = self.points_to_voxels(points)  # (n_points, 3) voxel coordinates
         voxels_raw, inverse_indices, counts = torch.unique(voxels, dim=0, return_inverse=True, return_counts=True)
         voxels_valid = voxels_raw[counts > 3]  # (n_valid, 3) of grid coordinates
         voxels_unique = torch.unique(voxels_valid, dim=0)  # (n_unique, 3) of grid coordinates

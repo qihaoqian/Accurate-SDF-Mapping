@@ -1,10 +1,12 @@
 identifier: grad_sdf.gui_base.GuiBaseConfig
 
-panel_split_ratio: 0.7
+scene_width: 1920
+scene_height: 1440
+panel_split_ratio: 0.6
 
-view_option: follow
-view_file: room0_view0.yaml
-objects: [scan, traj, current_cam, sdf_slice, octree]
+view_option: from_file # options: [follow, keyboard, from_file]
+view_file: room0_view3.yaml
+objects: [scan, traj, current_cam, mesh]
 # scan, traj, kf_cams, current_cam, octree, sdf_slice, sdf_slice_prior, sdf_slice_residual, mesh, mesh_prior, gt_mesh
 
 scan_point_size: 1
@@ -25,8 +27,8 @@ octree_update_freq: 20
 octree_min_size: 1
 octree_color: [0.8, 0.8, 0.8]
 
-mesh_update_freq: 10
-mesh_resolution: 10
+mesh_update_freq: 5
+mesh_resolution: 40
 mesh_height_color_map: jet
 mesh_color_option: normal
 
@@ -34,7 +36,7 @@ sdf_slice_update_freq: 10
 sdf_slice_resolution: 50
 sdf_point_size: 22
 sdf_slice_axis: 2
-sdf_slice_position: 1.1
+sdf_slice_position: 0.99
 sdf_color_map: jet
 
 experiment_name: grad_sdf
@@ -45,3 +47,9 @@ gt_mesh_offset:
 
 mesh_remove_ceiling: true
 mesh_ceiling_thickness: 0.6
+
+save_video_path: video_mesh50.mp4
+video_fps: 60
+video_codec: mp4v
+video_auto_record: false
+video_auto_end: false

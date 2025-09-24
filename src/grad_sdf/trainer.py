@@ -58,14 +58,19 @@ class Trainer:
         self.loss_dict = dict()
 
         timer_on = self.cfg.profiling
-        self.timer_train_frame = GpuTimer("train with frame", enable=timer_on)
-        self.timer_select_key_frames = GpuTimer("select key frames", enable=timer_on)
-        self.timer_sample_rays = GpuTimer("sample rays", enable=timer_on)
-        self.timer_generate_sdf_samples = GpuTimer("generate sdf samples", enable=timer_on)
-        self.timer_compute_offset_points = GpuTimer("compute offset points", enable=timer_on)
-        self.timer_find_voxel_indices_offset_points = GpuTimer("find voxel indices for offset points", enable=timer_on)
-        self.timer_find_voxel_indices_sampled_xyz = GpuTimer("find voxel indices for sampled_xyz", enable=timer_on)
-        self.timer_training_iteration = GpuTimer("training iteration", enable=timer_on)
+        verbose = self.cfg.profiling_verbose
+        self.timer_train_frame = GpuTimer("train with frame", enable=timer_on, verbose=verbose)
+        self.timer_select_key_frames = GpuTimer("select key frames", enable=timer_on, verbose=verbose)
+        self.timer_sample_rays = GpuTimer("sample rays", enable=timer_on, verbose=verbose)
+        self.timer_generate_sdf_samples = GpuTimer("generate sdf samples", enable=timer_on, verbose=verbose)
+        self.timer_compute_offset_points = GpuTimer("compute offset points", enable=timer_on, verbose=verbose)
+        self.timer_find_voxel_indices_offset_points = GpuTimer(
+            "find voxel indices for offset points", enable=timer_on, verbose=verbose
+        )
+        self.timer_find_voxel_indices_sampled_xyz = GpuTimer(
+            "find voxel indices for sampled_xyz", enable=timer_on, verbose=verbose
+        )
+        self.timer_training_iteration = GpuTimer("training iteration", enable=timer_on, verbose=verbose)
 
         self.training_iteration_end_callback: Callable[[Trainer], None] = None  # type: ignore
         self.training_frame_start_callback: Callable[[Trainer, Frame], bool] = None  # type: ignore

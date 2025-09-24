@@ -10,11 +10,24 @@ class MarchingCubesWrapper:
     @staticmethod
     def collect_valid_cubes(*args, **kwargs):
         print("Warning: Using mcubes which does not support collect_valid_cubes. Returning nothing.")
-        return [[]]
+        # cube_coords, cube_config_indices, cube_edge_indices, edge_coords
+        return [[], [], [], []]
 
     @staticmethod
-    def process_valid_cubes(valid_cubes, coords_min, grid_res, grid_shape, grid_values, iso_value, *args, **kwargs):
-        print("Warning: Using mcubes which ignores valid_cubes")
+    def process_valid_cubes(
+        cube_coords,
+        cube_config_indices,
+        cube_edge_indices,
+        edge_coords,
+        coords_min,
+        grid_res,
+        grid_shape,
+        grid_values,
+        iso_value,
+        *args,
+        **kwargs
+    ):
+        print("Warning: Using mcubes which ignores cube_coords, cube_config_indices, cube_edge_indices, edge_coords.")
         assert grid_values.shape[0] == grid_shape[0]
         assert grid_values.shape[1] == grid_shape[1]
         assert grid_values.shape[2] == grid_shape[2]

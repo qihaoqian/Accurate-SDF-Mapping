@@ -1,10 +1,10 @@
 import os
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 import pandas as pd
 from tqdm import tqdm
 
-from grad_sdf import o3d, torch
+from grad_sdf import np, o3d, torch
 from grad_sdf.evaluator_base import EvaluatorBase
 from grad_sdf.model import SdfNetwork, SdfNetworkConfig
 from grad_sdf.utils.dict_util import flatten_dict
@@ -179,10 +179,10 @@ class GradSdfEvaluator(EvaluatorBase):
         grid_resolution: float,
         fields: list[str] = None,
         iso_value: float = 0.0,
-        voxel_filter: Callable[[torch.Tensor, torch.Tensor], list] | None = None,
+        grid_vertex_filter: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
     ):
-        if self.clean_mesh and voxel_filter is None:
-            voxel_filter = self.model.voxel_filter_by_size
+        if self.clean_mesh and grid_vertex_filter is None:
+            grid_vertex_filter = self.model.grid_vertex_filter
 
         if fields is None:
             fields = ["sdf_prior", "sdf"]
@@ -193,7 +193,7 @@ class GradSdfEvaluator(EvaluatorBase):
             grid_resolution=grid_resolution,
             fields=fields,
             iso_value=iso_value,
-            voxel_filter=voxel_filter,
+            grid_vertex_filter=grid_vertex_filter,
         )
 
 
@@ -206,15 +206,19 @@ def main():
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--model-path", type=str, required=True)
     parser.add_argument("--output-dir", type=str)
-    parser.add_argument("--batch-size", type=int, default=20480)
+    parser.add_argument("--batch-size", type=int, default=40960)
     parser.add_argument("--device", type=str, default="cuda")
+
+    parser.add_argument("--apply-dataset-offset", action="store_true")
+
+    parser.add_argument("--extract-grid", action="store_true")
+    parser.add_argument("--grid-resolution", type=float, default=0.0125)
+    parser.add_argument("--bound-min", type=float, nargs=3)
+    parser.add_argument("--bound-max", type=float, nargs=3)
+    parser.add_argument("--extract-fields", type=str, nargs="+", default=["sdf", "sdf_prior"])
 
     parser.add_argument("--extract-mesh", action="store_true")
     parser.add_argument("--clean-mesh", action="store_true")
-    parser.add_argument("--bound-min", type=float, nargs=3)
-    parser.add_argument("--bound-max", type=float, nargs=3)
-    parser.add_argument("--grid-resolution", type=float, default=0.0125)
-    parser.add_argument("--extract-fields", type=str, nargs="+", default=["sdf", "sdf_prior"])
     parser.add_argument("--iso-value", type=float, default=0.0)
 
     parser.add_argument("--sdf-and-grad-metrics", action="store_true")
@@ -240,15 +244,38 @@ def main():
         output_dir = os.path.abspath(output_dir)
     os.makedirs(output_dir, exist_ok=True)
 
+    offset = trainer_cfg.data.dataset_args.get("offset", None)
+
     evaluator = GradSdfEvaluator(
         batch_size=args.batch_size,
+        clean_mesh=args.clean_mesh,
         model_cfg=trainer_cfg.model,
         model_path=args.model_path,
         # add offset to the model input if specified in the dataset args
         # the test data is not offset, so we need to offset the model input
-        model_input_offset=trainer_cfg.data.dataset_args.get("offset", None),
+        model_input_offset=offset if args.apply_dataset_offset else None,
         device=args.device,
     )
+
+    if args.extract_grid:
+        bound_min = args.bound_min
+        bound_max = args.bound_max
+        if bound_min is None:
+            bound_min = trainer_cfg.model.residual_net_cfg.bound_min
+        if bound_max is None:
+            bound_max = trainer_cfg.model.residual_net_cfg.bound_max
+        results = evaluator.extract_sdf_grid(
+            bound_min=bound_min,
+            bound_max=bound_max,
+            grid_resolution=args.grid_resolution,
+        )
+        for field_name in args.extract_fields:
+            assert field_name in results, f"Field {field_name} not found in model output"
+            grid = results[field_name].cpu().numpy()
+            grid_file = os.path.join(output_dir, f"grid_{field_name}.npy")
+            with open(grid_file, "wb") as f:
+                np.save(f, grid)
+            tqdm.write(f"Saved SDF grid ({field_name}) to {grid_file}")
 
     mesh_files = []
     if args.extract_mesh:
@@ -264,7 +291,6 @@ def main():
             grid_resolution=args.grid_resolution,
             fields=args.extract_fields,
             iso_value=args.iso_value,
-            voxel_filter=evaluator.model.voxel_filter_by_size if args.clean_mesh else None,
         )
         for mesh_name, mesh in zip(args.extract_fields, meshes):
             mesh_file = os.path.join(output_dir, f"mesh_{mesh_name}.ply")
