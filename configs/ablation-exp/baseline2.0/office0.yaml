@@ -1,0 +1,72 @@
+seeding: 12345
+log_dir: './logs'
+decoder: parallel_hash_net
+dataset: replica
+
+exp_name: replica/ablation-exp/baseline2.0/office0-0.1
+
+criteria:
+  boundary_loss_weight: 1000
+  perturbation_loss_weight: 200
+  eikonal_surface_weight: 3
+  eikonal_space_weight: 10
+  heat_weight: 0
+  sign_weight_free: 0
+  sign_weight_occ: 0
+  projection_weight: 100
+  grad_dir_weight: 0
+  heat_lambda: 4
+  h1: 0.02
+
+decoder_specs:
+  voxel_size: 0.05 # same as mapper_specs
+  L: 4  # Number of levels
+  F_entry: 2  # Number of feature dimensions per entry
+  log2_T: 19  # each level's hashmap_size =  F_entry * (2**F_entry)
+  b: 2.0  # each level's resolution = N_min * (b**Level)
+  mlp_layer: 5
+  mlp_hidden_dim: 64
+  bound: [[0.0, 5.05], [0.89, 4.16], [0.4, 4.65]]
+  activation: "LeakyReLU"
+
+sample_specs:
+  N: 1
+  M: 2
+  d_min: 0.07
+  delta: 0.12
+  sigma_s: 0.06
+  max_depth: 10.0
+
+mapper_specs:
+  start_frame: 0
+  end_frame: -1
+  N_rays_each: 20480 # mapping's sampling ray
+  num_vertexes: 200000
+  inflate_margin_ratio: 0.1
+  voxel_size: 0.1
+  full_depth: 5
+  num_iterations: 1
+  init_num_iterations: 10
+  num_init_frames: 2
+  lr: 0.005
+  final_iter: 0
+  mesh_res: 80
+  overlap_th: 0.8
+  kf_window_size: 8
+  kf_selection_method: "multiple_max_set_coverage" # "random” or “multiple_max_set_coverage”
+  insert_method: "intersection" # "naive" or "intersection"
+  insert_ratio: 0.85
+  offset: 2.52 # used to make make the coordinate of each point positive
+
+debug_args:
+  verbose: false
+  render_res: [ 320, 240 ]
+
+data_specs:
+  data_path: './Datasets/Replica/office0'
+  max_depth: 10
+  use_gt: True
+
+
+
+

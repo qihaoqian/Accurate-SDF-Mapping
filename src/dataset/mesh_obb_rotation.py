@@ -5,13 +5,14 @@ import os
 # 加载 mesh
 mesh_path_list = [
     # "Datasets/Replica/office0_mesh.ply",
-    "Datasets/Replica/office1_mesh.ply",
-    "Datasets/Replica/office2_mesh.ply",
-    "Datasets/Replica/office3_mesh.ply",
-    "Datasets/Replica/office4_mesh.ply",
-    "Datasets/Replica/room0_mesh.ply",
-    "Datasets/Replica/room1_mesh.ply",
-    "Datasets/Replica/room2_mesh.ply",
+    # "Datasets/Replica/office1_mesh.ply",
+    # "Datasets/Replica/office2_mesh.ply",
+    # "Datasets/Replica/office3_mesh.ply",
+    # "Datasets/Replica/office4_mesh.ply",
+    # "Datasets/Replica/room0_mesh.ply",
+    # "Datasets/Replica/room1_mesh.ply",
+    # "Datasets/Replica/room2_mesh.ply",
+    "Datasets/NewerCollege/quat_mesh.ply",
 ]
 
 for mesh_path in mesh_path_list:

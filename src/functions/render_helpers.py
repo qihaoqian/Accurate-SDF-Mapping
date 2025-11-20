@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-
+from tqdm import tqdm
 from .voxel_helpers import ray_intersect, ray_sample, ray_sample_isdf, edge_favored_samples
 
 
@@ -297,159 +297,6 @@ def eval_points(sdf_network, sampled_xyz):
     return results
 
 
-# convert sdf to weight
-def sdf2weights(sdf_in, trunc, z_vals, sample_mask_per):
-    weights = torch.sigmoid(sdf_in / trunc) * \
-              torch.sigmoid(-sdf_in / trunc)
-    # use the change of sign to find the surface, sdf's sign changes as it cross the surface
-    signs = sdf_in[:, 1:] * sdf_in[:, :-1]
-    mask = torch.where(
-        signs < 0.0, torch.ones_like(signs), torch.zeros_like(signs)
-    )
-    # return the index of the closest point outside the surface
-    inds = torch.argmax(mask, axis=1)
-    inds = inds[..., None]
-    z_min = torch.gather(z_vals, 1, inds)
-    # calculate truncation mask, delete the point behind the surface and exceed trunc, z_min is here approximate the surface
-    mask = torch.where(
-        z_vals < z_min + trunc,
-        torch.ones_like(z_vals),
-        torch.zeros_like(z_vals),
-    )
-    # mask truncation and mask not hit voxel
-    weights = weights * mask * sample_mask_per
-    return weights / (torch.sum(weights, dim=-1, keepdims=True) + 1e-8), z_min
-
-
-def render_rays(
-        rays_o,
-        rays_d,
-        map_states,
-        sdf_network,
-        step_size,
-        voxel_size,
-        truncation,
-        max_voxel_hit,
-        max_distance,
-        chunk_size=-1,
-        profiler=None,
-        return_raw=False,
-        eval=False
-):
-    centres = map_states["voxel_center_xyz"]
-    childrens = map_states["voxel_structure"]
-
-    if profiler is not None:
-        profiler.tick("ray_intersect")
-    """
-    intersections (dict):min_depth:(1,N_rays,N_hit_voxels) depth in camera coordinate if ray intersect voxel
-            max_depth: (1,N_rays,N_hit_voxels)
-            intersected_voxel_id: (1,N_rays,N_hit_voxels)
-    hits:(1,N_rays),Whether each ray hits a voxel
-    """
-    intersections, hits = ray_intersect(
-        rays_o, rays_d, centres,
-        childrens, voxel_size, max_voxel_hit, max_distance)
-    if profiler is not None:
-        profiler.tok("ray_intersect")
-    if hits.sum() == 0 and eval == True:
-        ray_mask = torch.zeros_like(hits).bool().cuda()
-        rgb = torch.zeros_like(rays_o).squeeze(0).cuda()
-        depth = torch.zeros((rays_o.shape[1],)).cuda()
-        return {
-            "weights": None,
-            "color": None,
-            "depth": None,
-            "z_vals": None,
-            "sdf": None,
-            "ray_mask": ray_mask,
-            "raw": None if return_raw else None
-        }
-
-    else:
-        assert (hits.sum() > 0)
-
-    ray_mask = hits.view(1, -1)  # Whether each ray hits a voxel
-    intersections = {
-        name: outs[ray_mask].reshape(-1, outs.size(-1))
-        for name, outs in intersections.items()
-    }  # min_depth max_depth intersected_voxel_id: (N_rays,N_hit_voxels)
-
-    rays_o = rays_o[ray_mask].reshape(-1, 3)  # remove rays which don't hit voxel
-    rays_d = rays_d[ray_mask].reshape(-1, 3)
-
-    """
-    samples = {
-        "sampled_point_depth": sampled_depth:(N_rays, N_points)
-        "sampled_point_distance": sampled_dists:(N_rays, N_points)
-        "sampled_point_voxel_idx": sampled_idx:(N_rays, N_points)
-    }
-    """
-    samples = ray_sample(intersections, step_size=step_size)
-
-    sampled_depth = samples['sampled_point_depth']
-    sampled_idx = samples['sampled_point_voxel_idx'].long()
-
-    # only compute when the ray hits, if don't hit setting False
-    sample_mask = sampled_idx.ne(-1)
-    if sample_mask.sum() == 0:  # miss everything skip
-        return None, 0
-
-    sampled_xyz = ray(rays_o.unsqueeze(
-        1), rays_d.unsqueeze(1), sampled_depth.unsqueeze(2))
-    samples['sampled_point_xyz'] = sampled_xyz
-
-    # apply mask(remove don't hit the voxel)
-    samples_valid = {name: s[sample_mask] for name, s in samples.items()}  # flatten to points
-
-    num_points = samples_valid['sampled_point_depth'].shape[0]
-    field_outputs = []
-    if chunk_size < 0:
-        chunk_size = num_points
-
-    for i in range(0, num_points, chunk_size):
-        chunk_samples = {name: s[i:i + chunk_size]
-                         for name, s in samples_valid.items()}
-
-        # get encoder features as inputs
-        chunk_inputs = get_features(chunk_samples, map_states, voxel_size)
-
-        # forward implicit fields
-        if profiler is not None:
-            profiler.tick("render_core")
-        chunk_outputs = sdf_network(chunk_samples['sampled_point_xyz'])
-        chunk_outputs['sdf'] = chunk_outputs['sdf'] + chunk_inputs['sdf_priors'][:, -1]
-
-        field_outputs.append(chunk_outputs)
-
-    field_outputs = {name: torch.cat(
-        [r[name] for r in field_outputs], dim=0) for name in field_outputs[0]}
-
-    outputs = {'sample_mask': sample_mask}
-
-    sdf = masked_scatter_ones(sample_mask, field_outputs['sdf']).squeeze(-1)
-    color = masked_scatter(sample_mask, field_outputs['color'])
-    sample_mask = outputs['sample_mask']
-
-    z_vals = samples["sampled_point_depth"]  # the depth from cam
-
-    weights, z_min = sdf2weights(sdf, truncation, z_vals, sample_mask)
-
-    rgb = torch.sum(weights[..., None] * color, dim=-2)
-
-    depth = torch.sum(weights * z_vals, dim=-1)
-
-    return {
-        "weights": weights,
-        "color": rgb,
-        "depth": depth,
-        "z_vals": z_vals,
-        "sdf": sdf,
-        "ray_mask": ray_mask,
-        "raw": z_min if return_raw else None
-    }
-
-
 def finite_diff_grad_combined_safe(X, map_states, voxel_size, sdf_network, h1=1e-4):
     """
     Safe finite difference gradient computation, ensuring gradients are computed only when perturbations 
@@ -542,15 +389,13 @@ def bundle_adjust_frames(
         voxel_size,
         N_rays=512,
         num_iterations=10,
-        bound=None,
         optim=None,
-        scaler=None,
-        frame_id=None,
-        use_adaptive_ending=False,
         writer=None,
-        epoch=0,
+        global_step=0,
         h1=0.05,
         sample_specs=None,
+        epoch=0,
+        frame_id=0,
 ):
     # sample rays from keyframes
     rays_o_all, rays_d_all, rgb_samples_all, depth_samples_all = [], [], [], []
@@ -559,7 +404,7 @@ def bundle_adjust_frames(
         pose = frame.get_ref_pose().cuda()
         valid_idx = torch.nonzero(frame.valid_mask.reshape(-1))
         sample_idx = valid_idx[torch.randint(low=0, high=int(valid_idx.shape[0]),
-                                             size=(int(num_iterations * (N_rays / num_keyframe)),))][:, 0]
+                                             size=(int(N_rays / num_keyframe),))][:, 0]
         sampled_rays_d = frame.rays_d.cuda().reshape(-1, 3)[sample_idx]
         R = pose[: 3, : 3].transpose(-1, -2)
         sampled_rays_d = sampled_rays_d @ R
@@ -567,12 +412,12 @@ def bundle_adjust_frames(
             1, -1).expand_as(sampled_rays_d)
         rays_d_all += [sampled_rays_d]
         rays_o_all += [sampled_rays_o]
-        rgb_samples_all += [frame.rgb.cuda().reshape(-1, 3)[sample_idx]]
+        # rgb_samples_all += [frame.rgb.cuda().reshape(-1, 3)[sample_idx]]
         depth_samples_all += [frame.depth.cuda().reshape(-1)[sample_idx]]
 
     rays_d_all = torch.cat(rays_d_all, dim=0)
     rays_o_all = torch.cat(rays_o_all, dim=0)
-    rgb_samples_all = torch.cat(rgb_samples_all, dim=0)
+    # rgb_samples_all = torch.cat(rgb_samples_all, dim=0)
     depth_samples_all = torch.cat(depth_samples_all, dim=0)
 
     loss_all = 0
@@ -622,33 +467,32 @@ def bundle_adjust_frames(
     nearest_distances[gaussian_positive_mask.squeeze(-1)] *= -1
     
     gt_sdf = nearest_distances.reshape(-1, 1)
-
+    
     point_voxel_idx = find_voxel_idx(sampled_xyz, map_states)
-    # Package sampled_xyz, sampled_depth, negative_sdf_mask, point_voxel_idx into a dictionary samples_valid
+
     samples = {
         'sampled_point_xyz': sampled_xyz,
         'sampled_point_voxel_idx': point_voxel_idx,
     }
 
     chunk_size = 100000000
-    idx = 0
-    for _ in range(num_iterations):
+    backward_cnt = 0
+    for idx in range(num_iterations):
         optim.zero_grad()
-        # apply mask(remove don't hit the voxel)
         num_points = sampled_xyz.shape[0]
         field_outputs = []
         
         # Separate mixed precision training: gradient computation outside autocast
         # First perform normal forward pass within autocast
-        with torch.cuda.amp.autocast():
-            for i in range(0, num_points, chunk_size):
-                chunk_samples = {name: s[i:i + chunk_size]
-                                 for name, s in samples.items()}
-                chunk_inputs = get_features(chunk_samples['sampled_point_xyz'],chunk_samples['sampled_point_voxel_idx'], map_states, voxel_size)
-                chunk_outputs = sdf_network(chunk_samples['sampled_point_xyz'])
-                chunk_outputs['sdf'] = chunk_outputs['sdf'] + chunk_inputs['sdf_priors'][:, -1]
-                # print(f"chunk_outputs['sdf']: {chunk_outputs['sdf'].mean().item()}, {chunk_outputs['sdf'].min().item()}, {chunk_outputs['sdf'].max().item()}")
-                field_outputs.append(chunk_outputs)
+        # with torch.cuda.amp.autocast():
+        for i in range(0, num_points, chunk_size):
+            chunk_samples = {name: s[i:i + chunk_size]
+                                for name, s in samples.items()}
+            chunk_inputs = get_features(chunk_samples['sampled_point_xyz'],chunk_samples['sampled_point_voxel_idx'], map_states, voxel_size)
+            chunk_outputs = sdf_network(chunk_samples['sampled_point_xyz'])
+            chunk_outputs['sdf'] = chunk_outputs['sdf'] + chunk_inputs['sdf_priors'][:, -1]
+            # print(f"chunk_outputs['sdf']: {chunk_outputs['sdf'].mean().item()}, {chunk_outputs['sdf'].min().item()}, {chunk_outputs['sdf'].max().item()}")
+            field_outputs.append(chunk_outputs)
         
         # Perform gradient computation outside autocast for high precision
         for i in range(0, num_points, chunk_size):
@@ -665,42 +509,46 @@ def bundle_adjust_frames(
             [r[name] for r in field_outputs], dim=0) for name in field_outputs[0]}
         
         # Final loss computation within autocast
-        with torch.cuda.amp.autocast():
-            pred_sdf = field_outputs['sdf']
+        # with torch.cuda.amp.autocast():
+        pred_sdf = field_outputs['sdf']
 
-            # Loss computation
-            loss , loss_dict = loss_criteria(
-                pred_sdf, 
-                points_xyz=sampled_xyz,
-                grad=grad,
-                positive_sdf_mask=positive_sdf_mask,
-                negative_sdf_mask=negative_sdf_mask,
-                surface_mask=surface_mask,
-                perturbation_mask=perturbation_mask,
-                ray_sample_mask=ray_sample_mask,
-                gt_sdf=gt_sdf,
-            )
+        # Loss computation
+        loss , loss_dict = loss_criteria(
+            pred_sdf, 
+            points_xyz=sampled_xyz,
+            grad=grad,
+            positive_sdf_mask=positive_sdf_mask,
+            negative_sdf_mask=negative_sdf_mask,
+            surface_mask=surface_mask,
+            perturbation_mask=perturbation_mask,
+            ray_sample_mask=ray_sample_mask,
+            gt_sdf=gt_sdf,
+        )
             
-        global_step = epoch * num_iterations + idx
-        print(f"loss_dict: {loss_dict}")
+        global_step += 1
         if writer is not None:
             writer.add_scalar('loss/total_loss', loss.item(), global_step)
             for key, value in loss_dict.items():
                 writer.add_scalar(f'loss/{key}', value, global_step)
             
-        if use_adaptive_ending:
-            loss_all += loss.item()
-            loss_mean = loss_all / (epoch + 1)
-            if loss_mean < loss:
-                exceed_cnt += 1
-            else:
-                exceed_cnt = 0
-            if exceed_cnt >= 2 and frame_id != 0:
-                break
-        idx += 1
-        scaler.scale(loss).backward()
-        scaler.step(optim)
-        scaler.update()
+        # loss_all += loss.item()
+        # loss_mean = loss_all / (epoch + 1)
+        # if loss_mean < loss:
+        #     exceed_cnt += 1
+        # else:
+        #     exceed_cnt = 0
+        # if exceed_cnt >= 2 and frame_id != 0:
+        #     break
+
+        loss.backward()
+        optim.step()
+        
+        backward_cnt += 1
+        tqdm.write(f"idx: {idx},loss_dict: {loss_dict}")
+
+    if writer is not None:
+        writer.add_scalar(f"iterations", backward_cnt, frame_id)
+    return global_step, backward_cnt
 
 def find_voxel_idx(points, map_states):
     """

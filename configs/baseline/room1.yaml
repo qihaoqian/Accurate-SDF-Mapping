@@ -44,14 +44,14 @@ mapper_specs:
   num_iterations: 10
   max_voxel_hit: 10
   final_iter: 0
-  mesh_res: 256
+  mesh_res: 80
   overlap_th: 0.8
   kf_window_size: 8
   kf_selection_method: "multiple_max_set_coverage" # "random” or “multiple_max_set_coverage”
   kf_selection_random_radio: 0.5   # random keyframe ratio
   insert_method: "intersection" # "naive" or "intersection"
   insert_ratio: 0.85
-  offset: 2.52 # used to make make the coordinate of each point positive
+  offset: 3.22 # used to make make the coordinate of each point positive
   use_adaptive_ending: True # adaptive iteration
 
 debug_args:

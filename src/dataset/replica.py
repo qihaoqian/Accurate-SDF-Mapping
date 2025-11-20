@@ -46,23 +46,16 @@ class DataLoader(Dataset):
             depth[depth > self.max_depth] = 0
         return depth
 
-    def load_image(self, index):
-        rgb = cv2.imread(
-            osp.join(self.data_path, 'results/frame{:06d}.jpg'.format(index)), -1)
-        rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        return rgb / 255.0
-
     def __len__(self):
         return self.num_imgs
 
     def __getitem__(self, index):
-        img = torch.from_numpy(self.load_image(index)).float()
         depth = self.load_depth(index)
         depth = None if depth is None else torch.from_numpy(depth).float()  # (H,W)
         pose = self.gt_pose[index] if (self.use_gt or self.init == False) else None
         if self.init == False:
             self.init = True
-        return index, img, depth, self.K, pose
+        return index, depth, self.K, pose
 
 
 if __name__ == '__main__':
@@ -70,9 +63,9 @@ if __name__ == '__main__':
 
     loader = DataLoader(sys.argv[1])
     for data in loader:
-        index, img, depth, K, _ = data
+        index, depth, K, _ = data
         print(K)
-        print(index, img.shape)
-        cv2.imshow('img', img.numpy())
+        # print(index, img.shape)
+        # cv2.imshow('img', img.numpy())
         cv2.imshow('depth', depth.numpy())
         cv2.waitKey(1)

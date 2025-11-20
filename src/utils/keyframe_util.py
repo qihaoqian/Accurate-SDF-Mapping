@@ -1,6 +1,7 @@
 import torch
 
 from torch.nn.utils.rnn import pad_sequence
+from tqdm import tqdm
 
 """
     Overwrite all voxels contained in the keyframe multiple times
@@ -26,16 +27,25 @@ from torch.nn.utils.rnn import pad_sequence
 """
 
 
-def multiple_max_set_coverage(kf_graph, kf_seen_voxel_num, kf_unoptimized_voxels, kf_optimized_voxels,
-                              windows_size, kf_svo_idx, kf_all_voxels, num_vertexes):
+def multiple_max_set_coverage(
+    kf_graph,
+    kf_seen_voxel_num,
+    kf_unoptimized_voxels,
+    kf_optimized_voxels,
+    windows_size,
+    kf_svo_idx,
+    kf_all_voxels,
+    num_vertexes,
+):
     cnt = 0
     target_graph = []
     padded_tensor = pad_sequence(kf_svo_idx, batch_first=True, padding_value=-1)[:, :, 0]
     if kf_unoptimized_voxels is None:
         kf_unoptimized_voxels = torch.zeros(num_vertexes).cuda().bool()  # unoptimized voxels
         kf_all_voxels = torch.zeros(num_vertexes).cuda().bool()  # All voxels to be optimized
-        kf_optimized_voxels = torch.zeros(
-            num_vertexes).cuda().bool()  # The voxels seen by the currently selected x keyframes
+        kf_optimized_voxels = (
+            torch.zeros(num_vertexes).cuda().bool()
+        )  # The voxels seen by the currently selected x keyframes
 
         kf_seen_voxel_num = torch.tensor(kf_seen_voxel_num)  # (N)
         kf_unoptimized_voxels[padded_tensor.long() + 1] += True  # Empty number 0, because the back pad is filled with 0

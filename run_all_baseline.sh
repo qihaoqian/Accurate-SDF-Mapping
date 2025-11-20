@@ -7,7 +7,7 @@ echo "开始执行所有baseline配置文件..."
 echo "======================================"
 
 # 获取所有yaml配置文件并排序
-config_files=(configs/baseline/*.yaml)
+config_files=(configs/ablation-exp/sparse_octree/*.yaml)
 IFS=$'\n' sorted_files=($(sort <<<"${config_files[*]}"))
 unset IFS
 
@@ -25,7 +25,7 @@ for config_file in "${sorted_files[@]}"; do
     current_file=$((current_file + 1))
     echo ""
     echo "[$current_file/$total_files] 正在处理: $config_file"
-    echo "命令: python demo/run_mapping.py $config_file --save_mesh --evaluate --calculate_sdf_loss"
+    echo "命令: python demo/run_mapping.py $config_file --save_mesh --evaluate"
     echo "--------------------------------------"
     
     # 记录单个任务开始时间
@@ -33,7 +33,7 @@ for config_file in "${sorted_files[@]}"; do
     echo "任务开始时间: $task_start"
     
     # 执行命令
-    python demo/run_mapping.py "$config_file" --save_mesh --evaluate --calculate_sdf_loss
+    python demo/run_mapping.py "$config_file" --save_mesh --evaluate
     
     # 检查执行结果
     if [ $? -eq 0 ]; then

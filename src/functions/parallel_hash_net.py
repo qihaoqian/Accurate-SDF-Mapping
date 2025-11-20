@@ -11,6 +11,9 @@ class Decoder(nn.Module):
                  F_entry=None,
                  log2_T=None,
                  b=None,
+                 mlp_layer=None,
+                 mlp_hidden_dim=None,
+                 activation="ReLU",
                  **kwargs):
         super().__init__()
 
@@ -33,21 +36,20 @@ class Decoder(nn.Module):
                 },
                 network_config={
                     "otype": "FullyFusedMLP",
-                    "activation": "ReLU",
+                    "activation": activation,
                     "output_activation": "None",
-                    "n_neurons": 64,
-                    "n_hidden_la2yers": 1,
+                    "n_neurons": mlp_hidden_dim,
+                    "n_hidden_layers": mlp_layer,
                 }
             )
 
     def get_sdf(self, xyz):
-        # xyz = (xyz - self.bound[:, 0].to(xyz.device)) / self.max_dis.to(xyz.device)
         xyz = (xyz - self.bound[:, 0].to(xyz.device)) / self.bound_dis.to(xyz.device)
-        sdf = self.hash_sdf_out(xyz)
+        sdf = self.hash_sdf_out(xyz) * 0.1
         return sdf
 
     def forward(self, xyz):
-        sdf = self.get_sdf(xyz) * 0.1
+        sdf = self.get_sdf(xyz) 
 
         return {
             'sdf': sdf[:, 0],
